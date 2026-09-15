@@ -16,7 +16,7 @@ Six steps, one CLI command each.
 
 1. **Metadata** (`pcds metadata`, weekly) pulls the five JSON endpoints and writes them as small Parquet tables. Everything downstream joins against these: station ids, which variables exist, who reports what. `stations` and `histories` carry lat/lon and become GeoParquet.
 
-2. **Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`. Sizes come from station metadata, or from measured row counts for the years already written, whichever is available per year. Plan this once, before the backfill: see the warning under [Backfilling the rest of the archive](#backfilling-the-rest-of-the-archive).
+2. **Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 128 MiB floor, and writes the year to period map to `layout.json`. Sizes come from station metadata, or from measured row counts for the years already written, whichever is available per year. Plan this once, before the backfill: see the warning under [Backfilling the rest of the archive](#backfilling-the-rest-of-the-archive).
 
 3. **Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a token bucket capped at 2 req/s. The bucket is per process, so N parallel shards put N times that on PCIC. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`.
 
@@ -26,7 +26,7 @@ Six steps, one CLI command each.
 
 4. **Write** (`pack.py`) emits Parquet sorted by `(station_id, variable_id, obs_time)`, with dictionary-encoded ids, delta-packed timestamps, zstd, a page index and 150,000-row row groups. The sort is what makes the statistics selective, so a reader after one station skips nearly every row group. Daily appends do not write into the partitions; they drop a small *delta* into `_staging/delta/`, because at ~800 KiB/day you would wait most of a year to fill one properly sized file.
 
-5. **Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
+5. **Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Every file it emits is between `PCDS_MIN_FILE_BYTES` and `PCDS_MAX_FILE_BYTES` (128 MiB and 1 GiB): the writer rolls once a file passes the 256 MiB target, so only the final file can come out short, and it is merged back into its predecessor rather than left as a stub. The one case no writer can fix is a period holding less than the floor in total; that is a `pcds layout` problem and `pcds verify` says so. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
 
 6. **Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order, duplicate keys and file sizes. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
 
@@ -130,13 +130,15 @@ Every collection directory also carries `collection.json`, `README.md` and `AGEN
 | `obs_time`    | `timestamp[s]` | `DELTA_BINARY_PACKED`; seconds is exact for PCDS                    |
 | `value`       | `float64`      | `PCDS_VALUE_FLOAT32=1` halves it if you accept 7 significant digits |
 
-Long beats wide here because 22 networks report 358 variable definitions with no common schema. A wide table is mostly nulls and needs schema evolution every time a network adds a sensor. Sorted by `(station_id, variable_id, obs_time)`, the long form packs to roughly **3 bytes per row**.
+Long beats wide here because 22 networks report 358 variable definitions with no common schema. A wide table is mostly nulls and needs schema evolution every time a network adds a sensor. Sorted by `(station_id, variable_id, obs_time)`, the long form packs to roughly **1.1 bytes per row**.
 
-That 3 is the planning figure, and it is deliberately conservative. The 23M rows of pre-1971 data loaded so far measure **0.98 bytes/row**, but those are rounded daily readings that dictionary-encode almost for free. Modern 15-minute sensor floats carry far more entropy in `value` and will pack worse. Treat the modern end as unmeasured until it is loaded.
+Both ends of the record are now measured. 115.7M rows over 1872-1997 pack to **1.06 bytes/row**, and 2020 and 2021 to **1.36-1.39** -- the modern end does carry more entropy in `value`, as expected, but nowhere near enough to reach the 3.0 that used to be the planning figure. Planning at 3.0 overstated every partition by ~2.2x, and that is half of why the first layout asked for a 64 MiB floor and produced files of 2.5 to 13 MiB. The other half was the row estimator; see below.
 
 ### Partitioning by *period*, not by year
 
-Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 64 MiB floor: sparse history buckets into decades, recent years stand alone.
+Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 128 MiB floor: sparse history buckets into decades or, before 1999, into one bucket; recent years pair up. Ten periods of 129 to 242 MiB cover 1872-2026.
+
+The floor is the *only* cut rule. A `max_span_years` cap used to also cut a bucket once it grew past 50 years, and since PCDS needs more than a century of sparse history to clear any floor at all, the cap fired first and emitted a 2.5 MiB `period=1872-1921` -- exactly the partition the floor existed to prevent.
 
 ### Why the reads are cheap
 
@@ -198,19 +200,22 @@ uploaded yet, and quietly downgrades every byte-level check to an info.
 `pcds plan` measures this rather than guessing. Against live metadata today:
 
 ```
-  actively reporting histories : 947
-  observations / day           : 271,966
-  packed bytes / row           : 3.00
-  bytes / day                  : 796.8 KiB
-  bytes / year                 : 284.0 MiB
-  days to 64 MiB               : 82
-  days to 256 MiB              : 329
+  actively reporting histories : 651
+  station x variable slots     : 9,431
+  observations / day           : 218,054
+  packed bytes / row           : 1.06
+  bytes / day                  : 224.9 KiB
+  bytes / year                 : 80.2 MiB
+  days to 128.0 MiB            : 583
+  days to 256.0 MiB            : 1,166
 
-  append   20 14 * * *     daily 14:20 UTC (06:20 PT); ~797 KiB staged per run
-  compact  30 15 1 */3 *   quarterly; folds ~71 MiB of deltas into the period
+  append   20 14 * * *     daily 14:20 UTC (06:20 PT); ~225 KiB staged per run
+  compact  30 15 1 */3 *   quarterly; folds ~20 MiB of deltas into the period
 ```
 
-A full year of arrivals lands at ~284 MiB, which is why yearly partitions are the right grain for the modern end of the record.
+A full year of arrivals lands at ~80 MiB, which is why the modern end of the record pairs years rather than standing them alone: one year does not reach the floor.
+
+Compaction stays quarterly even though a period now takes ~583 days of arrivals to fill, because the interval is not only a sizing choice. Staged deltas live under `_staging/` and are not part of the published dataset, so a row is invisible to readers until the compaction that folds it, and the interval is the real publication lag.
 
 Re-run `pcds plan` after a season of real data; it switches from the metadata estimate to measured bytes/row from the catalog and will tell you if the cron should move.
 
@@ -262,8 +267,9 @@ If a mid-walk re-plan has already happened, `pcds layout --ignore-catalog` rebui
 | `PCDS_S3_ENDPOINT`                   | none             | Source Cooperative / R2 endpoint                  |
 | `PCDS_CONCURRENCY`                   | `4`              | parallel station fetches, per process             |
 | `PCDS_MAX_RPS`                       | `2.0`            | token bucket against PCIC, per process            |
+| `PCDS_MAX_FILE_BYTES`                | 1 GiB            | hard ceiling on any emitted file                  |
 | `PCDS_TARGET_FILE_BYTES`             | 256 MiB          | roll to a new part file at this size              |
-| `PCDS_MIN_FILE_BYTES`                | 64 MiB           | partition size floor for `pcds layout`            |
+| `PCDS_MIN_FILE_BYTES`                | 128 MiB          | partition size floor for `pcds layout`            |
 | `PCDS_ROW_GROUP_ROWS`                | 150,000          | ~450 KiB compressed; matches PORTO-FMT-009        |
 | `PCDS_REVISION_WINDOW_DAYS`          | 30               | trailing re-read window                           |
 | `PCDS_BACKFILL_CHUNK_YEARS`          | 5                | request window size                               |
@@ -329,8 +335,12 @@ still opens exactly one file. `tests/test_query_pruning.py` pins that.
 
 There is no finer fallback: files are sorted `(station_id, variable_id,
 obs_time)`, so `obs_time` is interleaved per station and every row group spans
-nearly the whole period. The partition is the time granularity, which is also
-why partitions are sized down to a 64 MiB floor rather than merged further.
+nearly the whole period. The partition is the time granularity, so the floor
+is a direct trade against pruning: every doubling of partition size doubles
+what a one-year query reads. 128 MiB is the low end of the 128 MiB - 1 GiB
+range that is conventional for cloud-native Parquet, chosen for that reason.
+It keeps the modern record at two-year periods; going to 512 MiB would put
+2009-2026 in a single file and make any one-year query read all of it.
 
 For programmatic access, `_manifest/files.parquet` is more precise still: it
 carries `obs_time_min`/`obs_time_max` and `station_id_min`/`station_id_max` per
@@ -344,7 +354,7 @@ statements, because `read_parquet` will not take a subquery as its argument.
 - **Climatologies** (`.../lister/climo/...`) are not ingested yet; the lister supports them and they would become a sixth collection.
 - **Two Portolan requirements are knowingly unmet.** See `DEVIATIONS.md` in the built catalog, and the table above.
 - **Partition swap is not atomic.** Compaction stages to `obs/_staging/`, deletes the old partition, then moves. There is a short window where a reader LISTing the prefix sees a partial partition. The catalog is written last, so catalog-driven readers are safe; a generation-suffixed prefix or an Iceberg table would close it properly. It is also a durability window, not only a visibility one: a crash after the delete and part way through the moves leaves the staged remainder to be wiped by the next run, and those rows have to be re-fetched.
-- **Nothing re-partitions written data.** Compaction only ever rewrites a period in place, so a layout change after a backfill cannot be applied to what is already on disk. `pcds layout` warns which partitions a new plan would orphan, but acting on it means re-fetching those years. A `pcds repartition` reading across old period directories is the missing piece.
+- **Re-partitioning written data only works when periods nest.** Compaction rewrites a period in place and never moves a row between periods, so `pcds layout` still warns that a new plan orphans written partitions. `scripts/repartition.py` recovers the common case without re-fetching anything: when the floor goes up, old periods merge without splitting, so each orphan nests whole inside one new period and its rows only need moving. It refuses to run when a written period straddles two new ones, which genuinely does need those years re-fetched.
 - **Time zones.** Observations are stored as published, in naive local standard time. `histories.tz_offset` is carried through but not applied.
 - **Non-BC records.** Everything is filtered to `provinces=BC`; PCDS also holds some Alberta data, and PCIC runs a separate Yukon/NWT instance on the same API.
 

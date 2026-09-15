@@ -28,10 +28,14 @@ def test_trailing_stub_merges_backwards():
     assert periods[-1].start_year <= 2021
 
 
-def test_max_span_caps_bucket_width():
-    yb = {y: 1 for y in range(1800, 1900)}
-    periods = plan_periods(yb, min_file_bytes=64 * MIB, max_span_years=20)
-    assert all(p.end_year - p.start_year + 1 <= 20 for p in periods)
+def test_a_century_of_sparse_years_is_one_bucket_not_a_stub():
+    # A `max_span_years` cap used to cut here at 20 (and in production at 50),
+    # emitting a partition far below the floor. The floor is now the only cut
+    # rule, so a sparse run merges for as long as it needs to.
+    yb = {y: 1 * MIB for y in range(1800, 1900)}
+    # 100 MiB total: one 64 MiB cut, then the 36 MiB remainder is a trailing
+    # stub and merges backwards, so the sparse run ends up whole.
+    assert plan_periods(yb, min_file_bytes=64 * MIB) == [Period("1800-1899", 1800, 1899)]
 
 
 def test_layout_roundtrip_and_lookup():
