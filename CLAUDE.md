@@ -6,17 +6,40 @@ unverified, and which mistakes are easy to make here.
 
 ## Status
 
-The offline paths now run and are gated in CI. Nothing has yet touched the live
-API or an S3 endpoint, so treat a smoke-test failure as informative rather than
-surprising.
+**A live backfill has run against PCIC, and was still running as this was
+written.** An earlier version of this section said nothing had touched the live
+API; that was wrong by tens of thousands of requests, and every risk judgement
+made from it was made on a false premise. Numbers below are from `logs/` and
+`data/_manifest/summary.json` at 2026-09-15 06:10 local and will have moved on.
 
-- 100 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
+- 35,653 requests to `services.pacificclimate.org`, 35,647 of them `200`.
+  115,658,039 rows across 20 files, 1.056 bytes/row, `obs_time` spanning
+  1872-01-01 to 1997-12-31. Periods `1872-1921` through `1998` are on disk.
+- **Zero 5xx in 35,653 requests.** The deterministic-500 gotcha below is
+  therefore still unconfirmed in production, and with it every code path that
+  hangs off it: `ingest.MAX_ATTEMPTS_500`, the retry branch, `quarantined()`
+  and `pcds failures`. The named example station `FLNRO-FERN/Endako` did not
+  500 here.
+- The only 404s are 6 requests for one station, `FLNRO-FERN/WADF2 Burn`, whose
+  `native_id` contains a space. Separately, 20 of the 6,977 stations have a
+  `native_id` with leading or trailing whitespace (`' OKNGTAPN'`, `'Hourglass '`)
+  because the padding strip is applied to lister CSV but not to metadata. 24
+  more have legitimate internal spaces and are fetched fine.
+- **`scripts/walk.sh` puts ~12 req/s on PCIC, six times the documented
+  ceiling.** `RateLimiter` is per interpreter, and the script runs 8 shards at
+  `PCDS_MAX_RPS=1.5`. Measured: 224 requests in 149s per shard. The comment at
+  the top of walk.sh acknowledges the multiplication, so this is a deliberate
+  default rather than an oversight, but it contradicts the Constraints section
+  below, which is the part a reader is likely to trust. Decide which one is the
+  policy before the next walk.
+- 144 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
   small catalog on disk and runs a real `rashid check` over it.
 - `ruff check .` is clean. The lint rule set is pinned explicitly in
   `pyproject.toml`; ruff's implicit default widens between releases and took the
   repo from clean to 56 findings on an upgrade.
-- Still first-run-unverified: everything that talks to PCIC or to S3, and the
-  DuckDB compaction SQL against real volumes.
+- Still first-run-unverified: **everything that talks to S3**, the published
+  catalog, and both scheduled workflows. `append` and `compact` have never run
+  against real data either; only `backfill` has.
 
 Six bugs were found and fixed getting there. The first three made the pipeline
 unrunnable; the last three lose data quietly, which is worse:
@@ -29,6 +52,18 @@ unrunnable; the last three lose data quietly, which is worse:
 | `cli.py` | `pcds portolan --base-url` without `--s3-uri` published an https `partition:glob`, which cannot be expanded. Now a hard error. |
 | `cli.py` | `compact --period X` folded X and then deleted **every** staged delta, losing rows for every other period unrecoverably, since the watermarks had already advanced past them. A scoped run now keeps the deltas. |
 | `state.py` | The 8 backfill shards each rewrote the whole of `watermarks.parquet` and shared one `.tmp` path, so shards silently overwrote each other and could publish a torn file. Concurrent writers now write `watermarks-<shard>.parquet` and `load` merges, later watermark winning. |
+
+Six more came out of a design review. Every one of them is silent, and every
+one is in a path that had never actually run:
+
+| Where | What |
+|---|---|
+| `_setup.yml` | `uv run $PCDS_COMMAND` is unquoted, and bash word-splits an expansion without applying quote removal to it, so a caller writing `--period "${{ ... }}"` shipped the quote characters into argv. `pcds compact --period ""` compacted a period literally named `""`, folded nothing, and kept the deltas: **the quarterly cron had never compacted anything**. The same bug put literal quotes into every published STAC href. Callers must not quote argument values; `tests/test_workflow_args.py` is the guard. |
+| `compact.py` | The swap deleted the live partition and then moved its replacement in. `PCDS_ROOT` is the publication prefix, so readers saw the partition empty and then partial, and a crash in the window destroyed a period the deltas could no longer rebuild. New files now carry a generation tag and move in alongside the old ones, `_SUCCESS` commits the swap, and `reconcile_period` settles an interrupted one either way. |
+| `walk.sh` | Used `part-*.parquet` as its "already done" marker, which also matches a partition a killed run left half-written, so it would be skipped forever with rows missing and nothing to say so. Now tests for `_SUCCESS`. |
+| `state.py` | `record_success` took `max(current, max_obs_time)` with no clamp, so one observation from a station with a bad clock parked the watermark years ahead. Every later append then asked for `time > <future> - window`, got nothing, and left the watermark alone, so the station stopped being mirrored while still counting as a success. |
+| `cli.py` | `append` passed `(None, None)` as the window for any station without a watermark, and `fetch_chunked` skips chunking when either bound is None. That made it the unbounded full-station request this file says never to send, for every station on a first run. |
+| `opendap.py` | `melt` cast with `safe=False`, which still raises on an unparseable token, and a null `obs_time` failed the cast to the non-nullable published schema. Either one discarded **every other variable's good data for the same window**, every run, until the station quarantined itself. Bad cells are now dropped individually and logged. |
 
 First thing to do:
 
@@ -136,13 +171,44 @@ in `.github/workflows/`.
 
 ## Next
 
-1. Get the smoke test green against the live service.
-2. Backfill 2020-present, then walk backwards in 5-year increments.
-3. Wire the Source Cooperative endpoint and credentials, publish, then run
+1. Settle the request-rate policy: either raise the documented ceiling to what
+   `walk.sh` actually does, or make the limiter cross-process so 8 shards share
+   one budget. The two cannot both stand.
+2. Finish the walk. `1872-1998` is on disk; `1999-present` is not.
+3. Establish the redistribution right before publishing anything. PCIC's
+   disclaimer is what `portolan.py` points `license_id = "other"` at, and a
+   disclaimer is not a grant. The originating agencies and the BC Climate
+   Related Monitoring Program agreement are the things to check. Add a LICENSE
+   file for the code while you are there.
+4. Wire the Source Cooperative endpoint and credentials, publish, then run
    `rashid check --live --live-base-url <published base>`, which probes range
    support and CORS. The offline pass is already gated in CI.
-4. File the time-partitioning case on
+5. File the time-partitioning case on
    https://github.com/portolan-sdi/portolan-spec/issues/196 with the sizing math.
 
-Not yet done: climatologies (`lister/climo/...`), an atomic partition swap, and
-a LICENSE file.
+Known and not yet addressed, from the same review:
+
+- `portolan.py` and `sql/demo.sql` both tell consumers there is a bloom filter
+  on `station_id`. There is not: `pack.py` guards on a `write_bloom_filter`
+  kwarg that does not exist in the installed pyarrow (25.0.1), so the guard has
+  never fired. Either use pyarrow's real bloom-filter API or drop the claim.
+- Temporal extents in the STAC are stamped `Z` while carrying naive local
+  standard time, so a client's time search is wrong by 7-8 hours. This is the
+  one place the repo localizes silently, which the gotchas below forbid.
+- Chunk boundaries are exclusive at both ends (`time<X` then `time>X`), so an
+  observation exactly on a boundary is fetched by neither chunk.
+- A correction to `None` upstream cannot propagate: nulls are dropped at melt
+  time and compaction is insert-only, so the superseded value survives.
+- `state.quarantined` promises a weekly full sweep that picks stations back up.
+  No such workflow or flag exists, so quarantine is permanent.
+- The CI backfill's `compact` job runs bare `pcds compact`, whose auto path
+  derives periods from *deltas*. Backfill writes base files, so it finds none,
+  logs "nothing to compact", and never merges the 8 shard files. Only
+  `walk.sh`, which passes `--period`, actually compacts.
+- Backfill shards do not go through `_setup.yml`, so they never enter the
+  `pcds-write` concurrency group that serializes every other writer.
+
+Not yet done: climatologies (`lister/climo/...`), and a genuinely atomic
+partition swap. The swap is now crash-safe, which is not the same thing: a
+reader who catches it mid-flight still sees some rows twice. Pointing the
+catalog at an explicit file list, rather than at a glob, is the way out.
