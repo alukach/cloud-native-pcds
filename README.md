@@ -447,7 +447,7 @@ the server:
 | | Bytes served | Of the 116.2 MiB archive |
 | --- | --- | --- |
 | Default config | 121,865,388 | 100% |
-| Ranged reads | 2,291,302 | 1.9% |
+| Ranged reads | 2,291,022 | 1.9% |
 
 One station's hourly series for two years is 16 KiB of that, in about 290 ms
 against the live bucket. What makes it cheap is the sort order rather than the
