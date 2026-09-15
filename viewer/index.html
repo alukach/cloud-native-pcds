@@ -158,7 +158,8 @@
     </div>
 
     <div class="stat-grid">
-      <div class="stat"><div class="k">Fetched</div><div class="v" id="stat-bytes">0 B</div></div>
+      <div class="stat"><div class="k">Fetched</div><div class="v" id="stat-bytes">0 B</div>
+        <div class="k" id="stat-bytes-sub">no partitions yet</div></div>
       <div class="stat"><div class="k">Archive</div><div class="v" id="stat-total">&mdash;</div></div>
     </div>
     <p class="hint" id="prune-hint">Read live from an S3 bucket on another origin.
@@ -181,7 +182,7 @@
 
     <div class="panel-body" id="panel"></div>
     <details id="log" open>
-      <summary>Query log &mdash; SQL, wall time, bytes over the wire</summary>
+      <summary>Query log &mdash; SQL, wall time, rows, and the partition bytes each query pulled</summary>
       <table><tbody id="log-rows"></tbody></table>
     </details>
   </section>
@@ -194,12 +195,14 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
 
 const $ = (id) => document.getElementById(id);
-// The archive is destined for Source Cooperative, so the page always reads it as
-// a remote bucket over a cross-origin HTTPS API, never as files beside itself.
-// Point it at the real thing with ?base=https://data.source.coop/<acct>/<repo>/
+// The page reads the archive as a remote bucket over a cross-origin HTTPS API,
+// never as files beside itself, so the deployed build and a local checkout differ
+// only in which bucket they point at. ?base= overrides either.
+const PUBLISHED = 'https://data.source.coop/alukach/pcds/';
+const LOCAL = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
 const BASE = (new URLSearchParams(location.search).get('base')
-  || `${location.protocol}//${location.hostname}:8788/pcds/`).replace(/\/?$/, '/');
-const STATS = new URL('/__stats', BASE).href;   // local bucket only; absent in production
+  || (LOCAL ? `${location.protocol}//${location.hostname}:8788/pcds/` : PUBLISHED)
+).replace(/\/?$/, '/');
 
 const CAT = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 // Sequential blue for a dark surface runs dark -> light: near-zero recedes into
@@ -216,7 +219,7 @@ const fmtVal = (n) => n == null ? '' : (Math.abs(n) >= 1000 || n === 0 ? n.toFix
 
 const state = {
   db: null, conn: null,
-  layout: null, summary: null, filesByPeriod: new Map(),
+  summary: null, periods: [], byPeriod: new Map(), pulled: new Set(),
   groups: [], group: null,
   stations: [], station: null,
   paintedBy: null,
@@ -231,9 +234,28 @@ function setStatus(text, kind = 'ready') {
   el.className = kind;
 }
 
-async function wireBytes() {
-  try { return (await (await fetch(STATS, { cache: 'no-store' })).json()).bytes; }
-  catch { return null; }   // served by something other than scripts/serve.py
+/** What a query costs over the wire.
+ *
+ *  The page cannot measure its own bytes: DuckDB fetches from inside a worker,
+ *  where Resource Timing does not reach. It does not need to. DuckDB-WASM pulls
+ *  each Parquet object whole, so a query against partitions it has not seen
+ *  before transfers exactly those objects, and the manifest already carries
+ *  their sizes. Counting them once per session is therefore exact, not an
+ *  estimate, for as long as the whole-object behaviour above holds. */
+function pull(periods) {
+  let bytes = 0;
+  for (const p of periods ?? []) {
+    if (state.pulled.has(p)) continue;
+    state.pulled.add(p);
+    bytes += state.byPeriod.get(p)?.bytes ?? 0;
+  }
+  if (bytes) {
+    totalFetched += bytes;
+    $('stat-bytes').textContent = fmtBytes(totalFetched);
+    $('stat-bytes-sub').textContent =
+      `${state.pulled.size} of ${state.byPeriod.size} partitions`;
+  }
+  return bytes;
 }
 
 let totalFetched = 0;
@@ -241,7 +263,7 @@ let totalFetched = 0;
 /** Run SQL, and account for it: wall time, bytes the server actually sent, and
  *  how much of the archive the partition filter left on the table. */
 async function q(label, sql, periods) {
-  const b0 = await wireBytes();
+  const wire = pull(periods);
   const t0 = performance.now();
   let res;
   try {
@@ -251,13 +273,10 @@ async function q(label, sql, periods) {
     throw err;
   }
   const ms = performance.now() - t0;
-  const b1 = await wireBytes();
-  const wire = (b0 == null || b1 == null) ? null : b1 - b0;
-  if (wire) { totalFetched += wire; $('stat-bytes').textContent = fmtBytes(totalFetched); }
-
-  let candidate = null;
-  if (periods) candidate = periods.reduce((a, p) => a + (state.filesByPeriod.get(p)?.bytes ?? 0), 0);
-  logRow(label, sql, ms, wire, res.numRows, candidate);
+  const candidate = periods
+    ? periods.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0)
+    : null;
+  logRow(label, sql, ms, periods ? wire : null, res.numRows, candidate);
   return toRows(res);
 }
 
@@ -292,15 +311,18 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>':
 /* ----------------------------------------------------------------- catalog */
 
 /** `period` is an opaque partition label, not a year: '1872-1903' sorts below
- *  '1900' as a string, so year ranges must be resolved through layout.json. */
+ *  '1900' as a string, so a year range has to be resolved to labels rather than
+ *  compared to them. The years come from `_manifest/files.parquet`, which records
+ *  the observations each object actually holds; layout.json plans the whole walk,
+ *  including years nobody has ingested yet, and is not published with the data. */
 function periodsFor(y0, y1) {
-  return state.layout.periods
+  return state.periods
     .filter((p) => p.end_year >= y0 && p.start_year <= y1)
     .map((p) => p.period);
 }
 
 const obsUrls = (periods) =>
-  periods.map((p) => `'${state.filesByPeriod.get(p).path}'`).join(', ');
+  periods.flatMap((p) => state.byPeriod.get(p).paths).map((u) => `'${u}'`).join(', ');
 
 const years = () => {
   const y0 = Math.min(+$('y0').value, +$('y1').value);
@@ -313,23 +335,15 @@ const varIds = () => `[${state.group.ids.join(',')}]::SMALLINT[]`;
 /* -------------------------------------------------------------------- boot */
 
 async function boot() {
-  const [layout, summary] = await Promise.all([
-    fetch(BASE + 'layout.json').then((r) => r.json()),
-    fetch(BASE + '_manifest/summary.json').then((r) => r.json()),
-  ]);
-  state.layout = layout;
+  const summary = await fetch(BASE + '_manifest/summary.json').then((r) => r.json());
   state.summary = summary;
 
   const yMin = new Date(summary.obs_time_min + 'Z').getUTCFullYear();
   const yMax = new Date(summary.obs_time_max + 'Z').getUTCFullYear();
   $('archive-sub').textContent =
-    `${fmtNum(summary.rows)} observations · ${summary.files} Parquet files · ${fmtBytes(summary.bytes)} · ${yMin}–${yMax}`;
+    `${fmtNum(summary.rows)} observations · ${summary.files} Parquet objects · ${fmtBytes(summary.bytes)} · ${yMin}–${yMax}`;
   $('stat-total').textContent = fmtBytes(summary.bytes);
   for (const el of [$('y0'), $('y1')]) { el.min = yMin; el.max = yMax; }
-  const newest = layout.periods.find((p) => p.start_year <= yMax && yMax <= p.end_year)
-    ?? layout.periods[layout.periods.length - 1];
-  $('y0').value = Math.max(yMin, newest.start_year);
-  $('y1').value = Math.min(yMax, newest.end_year);
 
   setStatus('starting DuckDB-WASM', 'busy');
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
@@ -360,15 +374,31 @@ async function boot() {
       `FROM read_parquet('${BASE}${path}')`);
   }
 
-  const files = await q('manifest', `SELECT path, period, rows, file_bytes, row_groups FROM files ORDER BY period`);
-  for (const f of files) {
-    state.filesByPeriod.set(f.period, { path: BASE + f.path, bytes: f.file_bytes, rows: f.rows, row_groups: f.row_groups });
+  // The manifest is the authority on what is in the bucket: which objects exist,
+  // how big they are, and which years each one actually covers. A stray prefix
+  // upstream that the manifest does not list stays invisible here, which is the
+  // behaviour you want.
+  state.periods = await q('manifest', `
+    SELECT period,
+           min(year(obs_time_min)) AS start_year,
+           max(year(obs_time_max)) AS end_year,
+           sum(file_bytes) AS bytes, sum(rows) AS rows,
+           list(path ORDER BY path) AS paths
+    FROM files GROUP BY 1 ORDER BY start_year, end_year`);
+  for (const p of state.periods) {
+    p.paths = Array.from(p.paths, (path) => BASE + path);
+    state.byPeriod.set(p.period, p);
   }
 
-  // One view over every partition file. hive_partitioning exposes `period`, and
-  // a filter on it drops whole files at bind time without opening them.
+  const newest = state.periods[state.periods.length - 1];
+  $('y0').value = Math.max(yMin, newest.start_year);
+  $('y1').value = Math.min(yMax, newest.end_year);
+
+  // One view over every partition object. hive_partitioning exposes `period`, and
+  // a filter on it drops whole objects at bind time without opening them.
   await state.conn.query(
-    `CREATE VIEW observations AS SELECT * FROM read_parquet([${obsUrls([...state.filesByPeriod.keys()])}], hive_partitioning = true)`);
+    `CREATE VIEW observations AS SELECT * FROM read_parquet(` +
+    `[${obsUrls(state.periods.map((p) => p.period))}], hive_partitioning = true)`);
 
   // variable_id is network-scoped: air temperature has a different id in each of
   // the 22 networks, so a variable is only meaningful as standard_name + cell_method.
@@ -565,8 +595,8 @@ async function refreshStations(fit = false) {
     `${fmtNum(state.group.ids.length)} network-scoped ids · ${fmtNum(rows.length)} stations report it`;
   $('period-hint').textContent = (() => {
     const ps = periodsFor(y0, y1);
-    const bytes = ps.reduce((a, p) => a + (state.filesByPeriod.get(p)?.bytes ?? 0), 0);
-    return `${ps.length}/${state.filesByPeriod.size} partitions · ${fmtBytes(bytes)} reachable`;
+    const bytes = ps.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0);
+    return `${ps.length}/${state.byPeriod.size} partitions · ${fmtBytes(bytes)} reachable`;
   })();
 
   paintStations();
@@ -669,7 +699,7 @@ async function renderSeries(panel) {
   const s = state.station;
   const chart = frame(panel, `${s.station_name || s.native_id} — ${state.group.display_name || state.group.standard_name}`,
     `${esc(s.network_name)} · station #${s.station_id} · rolled up per ${grain}. Only the partitions covering ` +
-    `these years are fetched; the other ${state.filesByPeriod.size - periods.length} objects in the bucket are never touched.`);
+    `these years are fetched; the other ${state.byPeriod.size - periods.length} objects in the bucket are never touched.`);
 
   const rows = await q(`series · station ${s.station_id}`, `
     SELECT epoch_ms(date_trunc('${grain}', obs_time)) AS t,

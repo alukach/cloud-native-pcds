@@ -280,6 +280,13 @@ Repository variables: `PCDS_ROOT`, `PCDS_S3_ENDPOINT`, `PCDS_S3_REGION`, `PCDS_B
 
 ## Querying it
 
+> **`layout.json` is not in the published bucket yet.** The snippet below is
+> correct against a local build, but `read_json_auto(root || '/layout.json')`
+> 404s against <https://data.source.coop/alukach/pcds/>: the upload carried the
+> seven prefixes and not the plan file beside them. Either push it, or resolve
+> years through `_manifest/files.parquet`, which records the years each object
+> actually holds and is published. `viewer/index.html` takes the second route.
+
 See [`sql/demo.sql`](sql/demo.sql). The short version:
 
 ```sql
@@ -331,6 +338,9 @@ statements, because `read_parquet` will not take a subquery as its argument.
 
 ## The viewer
 
+**<https://alukach.github.io/cloud-native-pcds/>**, reading the published
+archive on Source Cooperative.
+
 `viewer/index.html` is a single page that reads the archive the way a client on
 the internet will: DuckDB-WASM in the browser, querying Parquet over HTTP from a
 bucket on a different origin. There is no build step and no server-side query
@@ -340,6 +350,16 @@ layer, and nothing is preloaded.
 scripts/serve.py            # bucket on :8788, viewer on :8777
 open http://127.0.0.1:8777/viewer/
 ```
+
+The page picks its bucket from the hostname it is served on: the deployed build
+reads <https://data.source.coop/alukach/pcds/>, a local checkout reads
+`scripts/serve.py`. Nothing is templated at deploy time, so the file in the
+repository is the file that ships. `?base=<url>` overrides either, which is how
+you point a local checkout at the published bucket.
+
+`.github/workflows/pages.yml` publishes `viewer/` on every push to `main` that
+touches it. It needs Settings -> Pages -> Source set to "GitHub Actions" once;
+until that is set the deploy step fails with a 404 on the Pages API.
 
 `scripts/serve.py` is not a static file server. The archive is destined for
 Source Cooperative, so it answers the S3 REST API instead: ranged `GET` and
@@ -352,10 +372,19 @@ the page at the real thing with
 
 What the page demonstrates is partition pruning, with the arithmetic on screen.
 Every query is logged with its SQL, its wall time, the partitions it could reach,
-and the bytes the bucket actually sent, counted by the server rather than
-estimated by the page. Asking one station for 1997 reaches 1 of 20 objects and
+and the bytes it pulled. Asking one station for 1997 reaches 1 of 20 objects and
 leaves 90% of the archive untouched; asking about 1872 to 1997 reaches all
 twenty, and the log says so.
+
+The byte count is derived, not measured, and it is exact anyway: DuckDB fetches
+from inside a worker where Resource Timing does not reach, but it also pulls each
+object whole, so a query against partitions the page has not seen transfers
+exactly those objects and `_manifest/files.parquet` already carries their sizes.
+
+Year windows resolve to partition labels through `_manifest/files.parquet`
+rather than `layout.json`, because the manifest records the years each object
+actually holds while layout plans the entire walk, including years nobody has
+ingested yet. It is also the only one of the two that is published: see below.
 
 Four panels share one year window and one variable: a station map coloured by
 each station's mean, a time series, a monthly climatology, and a SQL console over
@@ -387,6 +416,7 @@ narrow slice of a wide archive.
 
 ## Known gaps
 
+- **`layout.json` is missing from the published bucket.** Every documented year-to-partition query reads it, and it 404s on Source Cooperative; `_manifest/files.parquet` is the published substitute. Uploading the file is the smaller fix.
 - **Climatologies** (`.../lister/climo/...`) are not ingested yet; the lister supports them and they would become a sixth collection.
 - **Two Portolan requirements are knowingly unmet.** See `DEVIATIONS.md` in the built catalog, and the table above.
 - **Partition swap is not atomic.** Compaction stages to `obs/_staging/`, deletes the old partition, then moves. There is a short window where a reader LISTing the prefix sees a partial partition. The catalog is written last, so catalog-driven readers are safe; a generation-suffixed prefix or an Iceberg table would close it properly.
