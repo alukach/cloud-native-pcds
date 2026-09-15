@@ -109,6 +109,30 @@ def chunk_ranges(
         lo = hi
 
 
+def clip_window(
+    lo: dt.datetime,
+    hi: dt.datetime,
+    min_obs: dt.datetime | None,
+    max_obs: dt.datetime | None,
+) -> tuple[dt.datetime, dt.datetime]:
+    """Narrow a requested range to the span a station actually reports over.
+
+    Selecting a station because its overall span overlaps the range is not the
+    same as every chunk of that range having data in it. A station that started
+    reporting in 2000, backfilled over 1870-2026, otherwise costs 26 requests
+    that return a bare header before the 6 that return rows. Measured over the
+    real metadata, 88% of a full-archive walk is such requests.
+
+    A non-overlapping span collapses to an empty range, which `chunk_ranges`
+    turns into zero windows, so the station costs no requests at all.
+    """
+    if min_obs is None or max_obs is None:
+        return (lo, hi)
+    # `time_constraints` closes the range with a strict `<`, so step one second
+    # past the last observation to keep it.
+    return (max(lo, min_obs), min(hi, max_obs + dt.timedelta(seconds=1)))
+
+
 def fetch_window(
     client: httpx.Client,
     settings: Settings,

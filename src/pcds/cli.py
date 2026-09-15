@@ -185,7 +185,7 @@ def backfill(
     import pyarrow.compute as pc
 
     from . import metadata as md
-    from .ingest import Target, fetch_many
+    from .ingest import Target, clip_window, fetch_many
     from .pack import RollingWriter, sort_table
     from .state import Watermarks
 
@@ -213,6 +213,16 @@ def backfill(
     if limit:
         targets = targets[:limit]
     log.info("backfill %d-%d: %d stations (shard %s)", start_year, end_year, len(targets), shard)
+
+    # The filter above keeps a station whose *overall* span overlaps the range,
+    # but `fetch_station` then chunks the whole range and requests every window,
+    # including the decades before the station existed. Clip per station so those
+    # windows are never generated; see `clip_window`.
+    span = {s["station_id"]: (s["min_obs_time"], s["max_obs_time"]) for s in stations}
+
+    def win(t: Target) -> tuple:
+        lo_, hi_ = clip_window(lo, hi, *span[t.station_id])
+        return (lo_, hi_, True)
 
     settings = Settings(**{**SETTINGS.__dict__, "backfill_chunk_years":
                            chunk_years or SETTINGS.backfill_chunk_years})
@@ -250,7 +260,7 @@ def backfill(
             total_rows += part.num_rows
 
     for res in fetch_many(
-        settings, targets, variables, lambda t: (lo, hi, True)
+        settings, targets, variables, win
     ):
         pending[res.target.station_id] = res
         while cursor < len(order) and order[cursor] in pending:

@@ -85,6 +85,12 @@ Every one of these cost real time to find. They are pinned in
   row-group statistics do not rescue it: the partition is the time granularity.
   Every documented snippet is executed by `tests/test_query_pruning.py`.
 - A full-station request with no time constraint can exceed 45s. Always chunk.
+- A window a station has no data for still costs a full request: the response
+  is the sequence name and a header row, nothing else. Selecting stations on
+  their overall span is not enough, because the chunker then walks the whole
+  requested range anyway. `ingest.clip_window` narrows the range to each
+  station's own `min_obs_time`/`max_obs_time` first; without it, 88% of a
+  1870-2026 walk (190k of 215k requests) returns a bare header.
 
 ## Constraints
 
