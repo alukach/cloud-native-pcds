@@ -15,16 +15,37 @@ sizing, so nothing is re-fetched.
 It refuses to touch anything if that nesting does not hold, because a written
 period straddling two new ones genuinely does need the years re-fetched.
 
-    uv run python scripts/repartition.py --root ./data [--apply]
+Nesting is judged on the rows, never on the period label. A label is only an
+upper bound on what the partition holds: a walk that stopped early, or data
+dropped afterwards, leaves `period=1872-1999` holding nothing after 1997, and
+comparing the label to a re-plan that now says `1872-1998` would refuse a move
+that is perfectly safe.
+
+    uv run pcds layout                                  # once, not per run
+    uv run python scripts/repartition.py --apply
+    uv run pcds catalog
 
 Dry run by default: it prints the moves and changes nothing.
+
+Run `pcds layout` once and leave it alone. It re-plans from scratch every time,
+and the plan shifts as the walk writes more years: with data to 1998 the sparse
+head came out as `1872-1999`, and after 1998 was dropped the same command said
+`1872-1998`. Chaining the two means every run can re-cut boundaries under data
+that is already on disk. Plan, then move, then let the walk continue.
+
+Safe to re-run, including after an interrupt. Moves land before the fold, so a
+run killed in between leaves the pieces under the target label; the next run
+sees a partition in more than one file and finishes the fold.
 """
 
 from __future__ import annotations
 
 import argparse
 
+import pyarrow.parquet as pq
+
 from pcds import compact, paths, storage
+from pcds.catalog import _stat
 from pcds.cli import _layout  # the same loader `pcds layout` writes through
 from pcds.config import Settings
 
@@ -45,7 +66,27 @@ def parse_period(label: str) -> tuple[int, int]:
     return int(lo), int(hi or lo)
 
 
-def plan_moves(layout, written: dict[str, list[str]]) -> dict[str, list[str]]:
+def data_years(store, files: list[str]) -> tuple[int, int] | None:
+    """The real year span of a partition, from `obs_time` footer statistics.
+
+    Footers rather than a scan: this has to stay cheap on a remote store, and
+    min/max per row group is exactly what is needed. Returns None for a
+    partition with no usable statistics, which the caller treats as "trust the
+    label" rather than guessing.
+    """
+    lo = hi = None
+    for path in files:
+        with store.fs.open_input_file(path) as f:
+            md = pq.ParquetFile(f).metadata
+            a, b = _stat(md, list(md.schema.names).index("obs_time"), "obs_time")
+        if a is None or b is None:
+            continue
+        lo = a if lo is None else min(lo, a)
+        hi = b if hi is None else max(hi, b)
+    return (lo.year, hi.year) if lo is not None else None
+
+
+def plan_moves(layout, written: dict[str, list[str]], spans: dict) -> dict[str, list[str]]:
     """new period -> old period labels that must fold into it.
 
     Raises if an old period is not wholly contained in one new period; that is
@@ -53,13 +94,14 @@ def plan_moves(layout, written: dict[str, list[str]]) -> dict[str, list[str]]:
     """
     moves: dict[str, list[str]] = {}
     for label in sorted(written):
-        lo, hi = parse_period(label)
+        lo, hi = spans[label] or parse_period(label)
         holders = {p.period for p in layout.periods if p.contains(lo) or p.contains(hi)}
         if len(holders) != 1:
             raise SystemExit(
-                f"period={label} spans {sorted(holders) or ['no planned period']} "
-                "in the new layout. Boundaries crossed, so those years have to be "
-                "re-fetched; this script will not guess. Nothing was changed."
+                f"period={label} holds data for {lo}-{hi}, which spans "
+                f"{sorted(holders) or ['no planned period']} in the new layout. "
+                "Boundaries crossed, so those years have to be re-fetched; this "
+                "script will not guess. Nothing was changed."
             )
         target = holders.pop()
         if target != label:
@@ -77,13 +119,26 @@ def main() -> None:
     store = storage.open_store(settings, root=args.root)
     layout = _layout(store)
     written = written_periods(store)
-    moves = plan_moves(layout, written)
+    spans = {label: data_years(store, files) for label, files in written.items()}
+    moves = plan_moves(layout, written, spans)
+
+    # A partition already under the right label but still in pieces is an
+    # interrupted earlier run: its moves landed and its compaction did not.
+    # Folding it is the rest of that job, so finish it rather than reporting
+    # nothing to do and leaving the pieces behind.
+    touched = set(moves) | {src for srcs in moves.values() for src in srcs}
+    for label, files in written.items():
+        if label not in touched and len(files) > 1:
+            moves[label] = []
 
     if not moves:
         print("Every written partition already matches the layout. Nothing to do.")
         return
 
     for target, sources in sorted(moves.items()):
+        if not sources:
+            print(f"period={target}  <-  fold {len(written[target])} file(s) already in place")
+            continue
         n = sum(len(written[s]) for s in sources)
         print(f"period={target}  <-  {n} file(s) from {', '.join(sources)}")
     if not args.apply:
