@@ -29,6 +29,7 @@ Notes that matter for parsing:
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -36,6 +37,9 @@ from urllib.parse import quote
 TIME_COL = "time"
 SEQUENCE = "station_observations"
 NULL_TOKENS = ["None", "", "NaN", "nan", "-9999", "-9999.0"]
+
+# Leading whitespace on a field: start of line, or just after a delimiter.
+_PAD = re.compile(rb"(?m)(^|,) +")
 
 # Characters that must survive unencoded for Pydap to parse the constraint.
 _CE_SAFE = ".<>=!,&_-~"
@@ -163,7 +167,12 @@ def strip_sequence_header(data: bytes) -> ListerCsv:
     if TIME_COL not in columns:
         raise ValueError(f"no {TIME_COL!r} column in {columns!r}")
     clean_header = ",".join(columns).encode()
-    return ListerCsv(columns=columns, body=clean_header + sep + body)
+    # Values are space-padded too, not just the header, and pyarrow's converters
+    # reject ' 2026-09-08 01:00:00' outright. Strip padding after each delimiter;
+    # the space *inside* a timestamp does not follow a comma, so it survives.
+    # ponytail: byte-level strip, safe because Pydap emits no quoted fields; if
+    # it ever does, parse with a real CSV dialect instead.
+    return ListerCsv(columns=columns, body=clean_header + sep + _PAD.sub(rb"\1", body))
 
 
 def read_wide(data: bytes):
