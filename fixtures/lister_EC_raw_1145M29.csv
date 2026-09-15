@@ -1,0 +1,7 @@
+station_observations
+wind_direction, air_temperature, wind_gust_speed, tendency_amount, wind_speed, mean_sea_level, dew_point, snow_amount, air_temperature_yesterday_high, relative_humidity, time, air_temperature_yesterday_low, total_precipitation
+225.0, 13.6, None, 0.1, 10.0, 102.0, 11.8, None, None, 89.0, 2026-09-08 01:00:00, None, None
+225.0, 13.6, None, 0.09, 9.0, 102.0, 11.3, None, None, 86.0, 2026-09-08 02:00:00, None, None
+202.5, 13.6, None, 0.11, 7.0, 102.1, 11.7, None, None, 88.0, 2026-09-08 04:00:00, None, None
+45.0, 21.8, 31.0, -0.04, 13.0, 102.3, 11.9, None, 18.8, 53.0, 2026-09-08 16:00:00, 11.8, 0.5
+None, 13.2, None, 0.12, 0.0, 102.5, 11.9, None, None, 92.0, 2026-09-08 22:00:00, None, None

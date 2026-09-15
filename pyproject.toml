@@ -1,0 +1,27 @@
+[project]
+name = "pcds-parquet"
+version = "0.1.0"
+description = "Cloud-optimized Parquet build of the BC Provincial Climate Data Set (PCDS)"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27",
+  "pyarrow>=17",
+  "duckdb>=1.1",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+pcds = "pcds.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pcds"]
+
+[tool.ruff]
+line-length = 100
