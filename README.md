@@ -338,8 +338,9 @@ statements, because `read_parquet` will not take a subquery as its argument.
 
 ## The viewer
 
-**<https://alukach.github.io/cloud-native-pcds/>**, reading the published
-archive on Source Cooperative.
+**<https://alukach.com/cloud-native-pcds/>**, reading the published archive on
+Source Cooperative. (The account's Pages custom domain applies to project sites,
+so `alukach.github.io/cloud-native-pcds/` redirects here.)
 
 `viewer/index.html` is a single page that reads the archive the way a client on
 the internet will: DuckDB-WASM in the browser, querying Parquet over HTTP from a
