@@ -20,14 +20,17 @@ run backfill --start-year 2025 --end-year 2026 --networks EC_raw --limit 12 --ch
 run compact
 run catalog
 run verify
-run portolan --base-url "https://example.org/pcds" --s3-uri "s3://example-bucket/pcds"
+# Relative hrefs on purpose: rashid then reads the bytes on disk. Given an
+# absolute base it would try to fetch them, 404, and downgrade every byte-level
+# check to an info. The published-URL shape is covered by tests/test_portolan.py.
+run portolan
 
 echo
 echo "==> tree"
+# `find -printf` is GNU-only and this runs on macOS too.
 find "$PCDS_ROOT" -type f \( -name '*.parquet' -o -name '*.json' -o -name '*.md' -o -name '*.png' \) \
-  -printf '%10s  %P\n' | sort -k2
+  | sort | while read -r f; do printf '%10s  %s\n' "$(wc -c <"$f")" "${f#"$PCDS_ROOT"/}"; done
 
 echo
-echo "==> validate with rashid (optional)"
-echo "    uvx rashid validate $PCDS_ROOT"
-echo "    Expect PORTO-FMT-034 to fail; see DEVIATIONS.md."
+echo "==> validate with rashid"
+uvx --from 'rashid>=0.1.8,<0.2.0' rashid check "$PCDS_ROOT"
