@@ -393,16 +393,17 @@ the page at the real thing with
 
 What the page demonstrates is partition pruning, with the arithmetic on screen.
 Every query is logged with its SQL, its wall time, the partitions it could reach,
-and the bytes it pulled. Against the currently published 20 objects, asking one
-station for 1997 reaches one of them and leaves 90% of the archive untouched;
-asking about 1872 to 1997 reaches all twenty, and the log says so. The counts
-come from `_manifest/files.parquet` at load time, so a re-partition changes what
-the page says without changing the page.
+and the bytes it pulled. The counts come from `_manifest/files.parquet` at load
+time, so a re-partition changes what the page says without changing the page.
+That matters right now: the published archive is currently a **single** object
+covering 1872-1998, so there is no partition pruning left to demonstrate and
+row-group pruning on `station_id` is carrying the page on its own.
 
-The byte count is derived, not measured, and it is exact anyway: DuckDB fetches
-from inside a worker where Resource Timing does not reach, but it also pulls each
-object whole, so a query against partitions the page has not seen transfers
-exactly those objects and `_manifest/files.parquet` already carries their sizes.
+The sidebar reports what the partition filter leaves *reachable*, which is the
+number partitioning exists to move; the per-query byte column is measured by
+`scripts/serve.py` and is blank against a published bucket, which counts nothing
+on the reader's behalf. The page cannot measure itself: DuckDB fetches from
+inside a worker, where Resource Timing does not reach.
 
 Year windows resolve to partition labels through `_manifest/files.parquet`
 rather than `layout.json`, because the manifest records the years each object
@@ -423,24 +424,45 @@ the same views (`observations`, `stations`, `histories`, `variables`,
 `cell_method` rather than `variable_id`, because ids are network-scoped; see
 above.
 
-### It fetches whole objects, not row groups
+### `forceFullHTTPReads` defaults to true, and it costs everything
 
-DuckDB-WASM buffers each Parquet object in full. Chrome strips the `Range` header
-from the probe its worker makes, so it never learns the object is range-readable
-and falls back to a whole-object `GET`. Partition pruning still does the real
-work, one object instead of twenty, and a partition already pulled answers every
-later question for free.
+DuckDB-WASM will not range-read unless it is told to. Left alone it skips the
+probe that would discover the object is range-readable and `GET`s the whole
+thing, which here is one 116 MiB object to answer a question about one station.
+The fix is three lines of config, and it is the difference between a page that
+works over the internet and one that does not:
 
-Native DuckDB against the same bucket goes further, down to row groups. For a
-single station in `period=1995`, measured against `scripts/serve.py`:
+```js
+filesystem: { forceFullHTTPReads: false, reliableHeadRequests: true, allowFullHTTPReads: true }
+```
 
-| Reader | Bytes for one station-year | Of a 10.7 MiB object |
+`reliableHeadRequests` lets it take the object size from a `HEAD` carrying
+`Range: bytes=0-` that answers 206, which is what Source Cooperative and
+`scripts/serve.py` both do. `allowFullHTTPReads` stays on so a bucket that cannot
+serve ranges still works, slowly, rather than failing to open.
+
+Measured over a full cold page load against `scripts/serve.py`, bytes counted by
+the server:
+
+| | Bytes served | Of the 116.2 MiB archive |
 | --- | --- | --- |
-| DuckDB (httpfs) | 50,601 | 0.5% |
-| DuckDB-WASM | 10,717,553 | 100% |
+| Default config | 121,865,388 | 100% |
+| Ranged reads | 2,291,302 | 1.9% |
 
-So the browser page is the demo, and a notebook is still the better tool for a
-narrow slice of a wide archive.
+One station's hourly series for two years is 16 KiB of that, in about 290 ms
+against the live bucket. What makes it cheap is the sort order rather than the
+partitioning: files are sorted by `station_id`, so row-group statistics skip
+almost every row group for a named station.
+
+### A question that names no station is the expensive one
+
+Colouring the map by each station's mean has no index to lean on: it has to read
+every station's values across the window. The page therefore refuses to do it on
+open when the window reaches more than 30 MiB, and puts the price on the button
+instead. This is not a rendering cost and GPU point rendering would not touch it
+(779 points, already drawn by a WebGL circle layer); it is 115.7M rows of
+`value` through single-threaded WASM. The lever that would help is smaller
+partitions, since the partition is the only time-pruning granularity there is.
 
 ---
 

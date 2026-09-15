@@ -158,11 +158,13 @@
     </div>
 
     <div class="stat-grid">
-      <div class="stat"><div class="k">Fetched</div><div class="v" id="stat-bytes">0 B</div>
-        <div class="k" id="stat-bytes-sub">no partitions yet</div></div>
+      <div class="stat"><div class="k">Reachable</div><div class="v" id="stat-bytes">&mdash;</div>
+        <div class="k" id="stat-bytes-sub">&nbsp;</div></div>
       <div class="stat"><div class="k">Archive</div><div class="v" id="stat-total">&mdash;</div></div>
     </div>
-    <p class="hint" id="prune-hint">Read live from an S3 bucket on another origin.
+    <p class="hint" id="prune-hint">Read live from an S3 bucket on another origin
+      by HTTP range request: DuckDB pulls Parquet footers and only the row groups a
+      query needs, never whole objects.
       A year window selects partitions, and only those objects are fetched; the rest of the
       archive is never touched. Objects already pulled are answered from cache, so the
       second question about a period is free.</p>
@@ -231,6 +233,11 @@ function writeUrl() {
   history.replaceState(null, '', `${location.pathname}?${p}`);
 }
 
+// A question that names no station has to read every station's values, and no
+// index helps with that. Below this the opening scan is a good trade; above it,
+// the reader gets the button and the price rather than a stalled page.
+const SCAN_BUDGET = 30 * 1024 * 1024;
+
 const CAT = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 // Sequential blue for a dark surface runs dark -> light: near-zero recedes into
 // the basemap, high values pop off it. Celsius gets the diverging pair instead,
@@ -246,7 +253,7 @@ const fmtVal = (n) => n == null ? '' : (Math.abs(n) >= 1000 || n === 0 ? n.toFix
 
 const state = {
   db: null, conn: null,
-  summary: null, periods: [], byPeriod: new Map(), pulled: new Set(),
+  summary: null, periods: [], byPeriod: new Map(),
   groups: [], group: null,
   stations: [], station: null, stationChosen: false,
   paintedBy: null,
@@ -261,36 +268,31 @@ function setStatus(text, kind = 'ready') {
   el.className = kind;
 }
 
-/** What a query costs over the wire.
+/** Bytes a partition filter leaves on the table.
  *
- *  The page cannot measure its own bytes: DuckDB fetches from inside a worker,
- *  where Resource Timing does not reach. It does not need to. DuckDB-WASM pulls
- *  each Parquet object whole, so a query against partitions it has not seen
- *  before transfers exactly those objects, and the manifest already carries
- *  their sizes. Counting them once per session is therefore exact, not an
- *  estimate, for as long as the whole-object behaviour above holds. */
-function pull(periods) {
-  let bytes = 0;
-  for (const p of periods ?? []) {
-    if (state.pulled.has(p)) continue;
-    state.pulled.add(p);
-    bytes += state.byPeriod.get(p)?.bytes ?? 0;
-  }
-  if (bytes) {
-    totalFetched += bytes;
-    $('stat-bytes').textContent = fmtBytes(totalFetched);
-    $('stat-bytes-sub').textContent =
-      `${state.pulled.size} of ${state.byPeriod.size} partitions`;
-  }
-  return bytes;
+ *  This is what the page can honestly say. It cannot measure what it actually
+ *  reads: DuckDB fetches from inside a worker, where Resource Timing does not
+ *  reach, and since it reads by range the answer is nowhere near the object
+ *  size anyway. What is knowable is how much of the archive the filter still
+ *  allows it to touch, which is the number partitioning exists to move. */
+function reachable(periods) {
+  return (periods ?? []).reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0);
 }
 
-let totalFetched = 0;
+/** Bytes the local bucket has actually served, when there is one listening.
+ *  scripts/serve.py counts them; a published bucket does not, so this is a
+ *  development instrument and the UI does without it when absent. */
+async function servedBytes() {
+  try {
+    const r = await fetch(new URL('/__stats', BASE).href, { cache: 'no-store' });
+    return (await r.json()).bytes;
+  } catch { return null; }
+}
 
 /** Run SQL, and account for it: wall time, bytes the server actually sent, and
  *  how much of the archive the partition filter left on the table. */
 async function q(label, sql, periods) {
-  const wire = pull(periods);
+  const before = await servedBytes();
   const t0 = performance.now();
   let res;
   try {
@@ -300,10 +302,9 @@ async function q(label, sql, periods) {
     throw err;
   }
   const ms = performance.now() - t0;
-  const candidate = periods
-    ? periods.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0)
-    : null;
-  logRow(label, sql, ms, periods ? wire : null, res.numRows, candidate);
+  const after = await servedBytes();
+  const read = (before == null || after == null) ? null : after - before;
+  logRow(label, sql, ms, read, res.numRows, periods ? reachable(periods) : null);
   return toRows(res);
 }
 
@@ -379,13 +380,22 @@ async function boot() {
   state.db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(workerUrl));
   await state.db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   URL.revokeObjectURL(workerUrl);
-  // DuckDB-WASM buffers each Parquet object whole: Chrome drops the `Range`
-  // header from the probe its worker makes, so it never learns the object is
-  // range-readable and falls back to a full GET. Partition pruning still does the
-  // heavy lifting (one object instead of twenty), and every later query against a
-  // partition already pulled is free. Native DuckDB over this same bucket prunes
-  // further, to row groups: 50 KiB of a 10.7 MiB object for a single station.
-  await state.db.open({ query: { castBigIntToDouble: true, castTimestampToDate: true } });
+  await state.db.open({
+    query: { castBigIntToDouble: true, castTimestampToDate: true },
+    filesystem: {
+      // Without this DuckDB-WASM never even asks whether the object is
+      // range-readable: it skips the probe and GETs the whole file, 121 MiB of
+      // it, to answer a question about one station. It defaults to true, which
+      // is the single most expensive default on this page.
+      forceFullHTTPReads: false,
+      // Trust a `HEAD` + `Range: bytes=0-` answered 206 as the object size,
+      // which is what Source Cooperative and scripts/serve.py both do.
+      reliableHeadRequests: true,
+      // Keep the fallback, so a bucket that cannot serve ranges still works,
+      // slowly, rather than failing to open.
+      allowFullHTTPReads: true,
+    },
+  });
   state.conn = await state.db.connect();
 
   setStatus('reading catalog', 'busy');
@@ -420,7 +430,7 @@ async function boot() {
   }
 
   const newest = state.periods[state.periods.length - 1];
-  $('y0').value = START.get('y0') ?? Math.max(yMin, newest.start_year);
+  $('y0').value = START.get('y0') ?? Math.max(yMin, newest.start_year, yMax - 1);
   $('y1').value = START.get('y1') ?? Math.min(yMax, newest.end_year);
 
   // One view over every partition object. hive_partitioning exposes `period`, and
@@ -477,11 +487,14 @@ async function boot() {
     state.stationChosen = true;
     await selectStation(START.get('st'));
   }
-  // A bare link gets the guided opening: one scan of the newest partition, which
-  // colours the map, picks a station worth showing, and leaves the object cached
-  // so every later query in this window costs nothing. A shared link gets exactly
-  // what was shared instead, including the absence of that scan.
-  if (SHARED ? START.get('paint') === '1' : true) await paintByMean();
+  // A bare link gets the guided opening, but only when the window is small
+  // enough to be worth scanning; otherwise the map opens uncoloured and says what
+  // colouring it would cost. A shared link gets exactly what was shared, including
+  // the absence of that scan, and an explicit paint=1 is a decision already made.
+  const wantPaint = SHARED
+    ? START.get('paint') === '1'
+    : reachable(periodsFor(...years())) <= SCAN_BUDGET;
+  if (wantPaint) await paintByMean();
   writeUrl();
   setStatus('ready');
 }
@@ -644,11 +657,15 @@ async function refreshStations(fit = false) {
   state.stations = rows;
   $('var-hint').textContent =
     `${fmtNum(state.group.ids.length)} network-scoped ids · ${fmtNum(rows.length)} stations report it`;
-  $('period-hint').textContent = (() => {
-    const ps = periodsFor(y0, y1);
-    const bytes = ps.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0);
-    return `${ps.length}/${state.byPeriod.size} partitions · ${fmtBytes(bytes)} reachable`;
-  })();
+  const ps = periodsFor(y0, y1);
+  const bytes = reachable(ps);
+  $('period-hint').textContent =
+    `${ps.length}/${state.byPeriod.size} partitions · ${fmtBytes(bytes)} reachable`;
+  $('stat-bytes').textContent = fmtBytes(bytes);
+  $('stat-bytes-sub').textContent = state.summary?.bytes
+    ? `${(100 * (1 - bytes / state.summary.bytes)).toFixed(0)}% of archive pruned`
+    : '\u00a0';
+  $('paint').textContent = `Colour map by mean (${fmtBytes(bytes)})`;
 
   paintStations();
   renderStationList();
@@ -658,18 +675,65 @@ async function refreshStations(fit = false) {
       { padding: 30, duration: 0 });
   }
   if (!state.stations.some((s) => s.station_id === state.station?.station_id)) {
-    state.station = rows.slice().sort((a, b) => b.history_count - a.history_count)[0] ?? null;
+    state.station = rows.slice().sort(bestFirst(y0, y1))[0] ?? null;
     state.stationChosen = false;
+    await pickDefault(y0, y1);
   }
   render();
   writeUrl();
 }
 
+/** Rank stations without reading a single observation.
+ *
+ *  `history_count` counts configurations upstream, not rows here, and on its own
+ *  happily opens on a station with four observations. Reporting frequency and
+ *  how much of the chosen window a station actually spans are both in the
+ *  metadata already, and together they pick something worth looking at for free.
+ *  Once a scan has run, its counts are better than any of this and win. */
+function bestFirst(y0, y1) {
+  const cadence = (s) => (/minute|hour/i.test(s.freq ?? '') ? 2 : /daily/i.test(s.freq ?? '') ? 1 : 0);
+  const span = (s) => {
+    const lo = s.min_obs_time ? new Date(s.min_obs_time).getUTCFullYear() : y1;
+    const hi = s.max_obs_time ? new Date(s.max_obs_time).getUTCFullYear() : y0;
+    return Math.min(y1, hi) - Math.max(y0, lo);
+  };
+  return (a, b) => (b.painted_n ?? -1) - (a.painted_n ?? -1)
+    || cadence(b) - cadence(a)
+    || span(b) - span(a)
+    || (b.history_count ?? 0) - (a.history_count ?? 0);
+}
+
+/** Open on a station that actually has data, without scanning every station.
+ *
+ *  Metadata gets the shortlist and the archive settles it. Asking about a dozen
+ *  named stations is cheap now that reads are ranged: the files are sorted by
+ *  `station_id`, so this touches a dozen runs of row groups rather than the whole
+ *  column. Each extra candidate is another run, so the list stays short. */
+async function pickDefault(y0, y1) {
+  const shortlist = state.stations.slice().sort(bestFirst(y0, y1)).slice(0, 12);
+  if (!shortlist.length) return;
+  const periods = periodsFor(y0, y1);
+  const winner = await q('pick an opening station worth showing', `
+    SELECT station_id, count(value) AS n
+    FROM observations
+    WHERE period IN (${periods.map((x) => `'${x}'`).join(',')})
+      AND station_id IN (${shortlist.map((x) => x.station_id).join(',')})
+      AND variable_id IN (${state.group.ids.join(',')})
+      AND value IS NOT NULL
+      AND obs_time >= TIMESTAMP '${y0}-01-01' AND obs_time < TIMESTAMP '${y1 + 1}-01-01'
+    GROUP BY 1 ORDER BY n DESC LIMIT 1`, periods);
+  if (winner.length) {
+    for (const st of state.stations) if (st.station_id === winner[0].station_id) st.painted_n ??= winner[0].n;
+    state.station = state.stations.find((st) => st.station_id === winner[0].station_id) ?? state.station;
+  }
+}
+
 function renderStationList() {
   const term = $('search').value.trim().toLowerCase();
+  const [y0, y1] = years();
   const hits = state.stations
     .filter((s) => !term || `${s.station_name} ${s.native_id} ${s.station_id}`.toLowerCase().includes(term))
-    .sort((a, b) => (b.painted_n ?? -1) - (a.painted_n ?? -1))
+    .sort(bestFirst(y0, y1))
     .slice(0, 60);
   $('results').innerHTML = hits.map((s) => `
     <li data-id="${s.station_id}">
