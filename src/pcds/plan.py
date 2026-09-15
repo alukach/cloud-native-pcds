@@ -39,6 +39,61 @@ OBS_PER_DAY = {
 DEFAULT_BYTES_PER_ROW = 3.0  # long schema, sorted, zstd-9: typically 2-4
 
 
+def estimated_year_rows(
+    histories: list[dict], start_year: int, end_year: int
+) -> dict[int, int]:
+    """Rows expected per calendar year, from station metadata alone.
+
+    Each history contributes its reporting frequency times its variable count
+    for every day it spans. This is the only source available for years that
+    have no data yet, which during a backfill is most of them.
+    """
+    year_rows: dict[int, int] = {}
+    for h in histories:
+        lo, hi = h.get("min_obs_time"), h.get("max_obs_time")
+        if not lo or not hi:
+            continue
+        nvars = len(h.get("variable_ids") or [])
+        per_day = OBS_PER_DAY.get(h.get("freq"), OBS_PER_DAY[None]) * nvars
+        for y in range(max(lo.year, start_year), min(hi.year, end_year) + 1):
+            lo_y = max(lo, dt.datetime(y, 1, 1))
+            hi_y = min(hi, dt.datetime(y + 1, 1, 1))
+            days = max((hi_y - lo_y).days, 0)
+            year_rows[y] = year_rows.get(y, 0) + int(per_day * days)
+    return year_rows
+
+
+def year_bytes_for_plan(
+    histories: list[dict],
+    start_year: int,
+    end_year: int,
+    *,
+    measured_rows: dict[int, int] | None = None,
+    measured_bytes_per_row: float | None = None,
+) -> dict[int, int]:
+    """Expected packed bytes per calendar year across the whole requested range.
+
+    Years that have been written use their measured row count at the measured
+    bytes/row; every other year falls back to the metadata estimate at the
+    conservative default rate. Mixing the two matters during a backfill: a plan
+    built from written years alone covers only the past, and because compaction
+    never moves rows between periods, a layout that omits a year cannot be
+    repaired afterwards without re-fetching it.
+
+    The rate is kept per-year for the same reason. Bytes/row measured over a
+    partial load is not representative of the years still to come, so applying
+    it to them would shrink the plan for data nobody has seen yet.
+    """
+    rows = estimated_year_rows(histories, start_year, end_year)
+    measured = measured_rows or {}
+    rows.update(measured)
+    rate = measured_bytes_per_row or DEFAULT_BYTES_PER_ROW
+    return {
+        y: int(n * (rate if y in measured else DEFAULT_BYTES_PER_ROW))
+        for y, n in rows.items()
+    }
+
+
 @dataclass
 class ArrivalRate:
     active_histories: int

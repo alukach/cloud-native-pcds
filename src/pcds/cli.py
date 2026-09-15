@@ -117,11 +117,12 @@ def layout(
 
     store = _store(root)
     end_year = end_year or dt.date.today().year + 1
-    bytes_per_row = planner.DEFAULT_BYTES_PER_ROW
-    year_rows: dict[int, int] = {}
+    measured_rows: dict[int, int] | None = None
+    bytes_per_row: float | None = None
 
     if store.exists(paths.MANIFEST_FILE):
-        # Measured: rows actually written per year.
+        # Rows actually written, per year. These override the estimate for the
+        # years they cover; `year_bytes_for_plan` keeps the rest of the range.
         from .storage import duckdb_connect
 
         con = duckdb_connect(SETTINGS, store)
@@ -130,29 +131,40 @@ def layout(
             f"SELECT EXTRACT(year FROM obs_time)::INT AS y, count(*) "
             f"FROM read_parquet('{paths.observations_glob(base)}') GROUP BY 1"
         ).fetchall()
-        year_rows = {int(y): int(c) for y, c in rows}
-        summary = catalog.summarize(catalog.load(store))
-        bytes_per_row = summary.get("bytes_per_row") or bytes_per_row
         con.close()
-    else:
-        # Estimated from metadata: each history contributes its frequency x
-        # variable count to every year it spans.
-        for h in md.load(store, "histories").to_pylist():
-            lo, hi = h.get("min_obs_time"), h.get("max_obs_time")
-            if not lo or not hi:
-                continue
-            nvars = len(h.get("variable_ids") or [])
-            per_day = planner.OBS_PER_DAY.get(h.get("freq"), planner.OBS_PER_DAY[None]) * nvars
-            for y in range(max(lo.year, start_year), min(hi.year, end_year) + 1):
-                lo_y = max(lo, dt.datetime(y, 1, 1))
-                hi_y = min(hi, dt.datetime(y + 1, 1, 1))
-                days = max((hi_y - lo_y).days, 0)
-                year_rows[y] = year_rows.get(y, 0) + int(per_day * days)
+        measured_rows = {int(y): int(c) for y, c in rows}
+        bytes_per_row = catalog.summarize(catalog.load(store)).get("bytes_per_row")
 
-    year_bytes = {y: int(n * bytes_per_row) for y, n in year_rows.items()}
+    year_bytes = planner.year_bytes_for_plan(
+        md.load(store, "histories").to_pylist(),
+        start_year,
+        end_year,
+        measured_rows=measured_rows,
+        measured_bytes_per_row=bytes_per_row,
+    )
     periods = plan_periods(
         year_bytes, min_file_bytes=SETTINGS.min_file_bytes
     ) or [Period(str(y), y, y) for y in range(start_year, end_year + 1)]
+    # Re-planning after data exists moves boundaries, and nothing moves rows
+    # between periods to follow: compaction only ever rewrites a period in
+    # place. A partition whose label leaves the plan is orphaned, invisible to
+    # `period_for`, and can only be recovered by re-fetching those years.
+    planned = {p.period for p in periods}
+    written = {
+        info.path.rsplit("period=", 1)[-1].split("/")[0]
+        for info in store.ls(paths.OBSERVATIONS, recursive=True)
+        if "period=" in info.path
+    }
+    orphaned = sorted(written - planned)
+    if orphaned:
+        log.warning(
+            "%d written partition(s) are not in the new plan: %s. Compaction "
+            "cannot re-partition them; re-backfill those years or keep the "
+            "previous layout.",
+            len(orphaned),
+            ", ".join(orphaned),
+        )
+
     lay = Layout(periods)
     with store.fs.open_output_stream(store.join(paths.LAYOUT_FILE)) as sink:
         sink.write(lay.to_json().encode())
