@@ -29,10 +29,13 @@ Notes that matter for parsing:
 from __future__ import annotations
 
 import io
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote
+
+log = logging.getLogger("pcds.opendap")
 
 TIME_COL = "time"
 SEQUENCE = "station_observations"
@@ -195,6 +198,33 @@ def read_wide(data: bytes):
     return table
 
 
+def _coerce(values, target):
+    """Cast to `target`, tolerating a token the service should not have sent.
+
+    The fast path is the vectorised cast. It raises outright on a single
+    unparseable cell, which used to propagate all the way out of fetch_window as
+    a parse error and discard every other variable's good data for the same
+    window, on every run, until the station quarantined itself. The fallback
+    turns only the bad cells into nulls and says how many there were.
+    """
+    import pyarrow as pa
+
+    try:
+        return values.cast(target, safe=False), 0
+    except (pa.ArrowInvalid, pa.ArrowNotImplementedError, ValueError):
+        out, bad = [], 0
+        for v in values.to_pylist():
+            if v is None:
+                out.append(None)
+                continue
+            try:
+                out.append(pa.scalar(v).cast(target).as_py())
+            except (pa.ArrowInvalid, pa.ArrowNotImplementedError, TypeError, ValueError):
+                out.append(None)
+                bad += 1
+        return pa.array(out, target), bad
+
+
 def melt(table, station_id: int, variable_ids: dict[str, int], value_type=None):
     """Wide station table -> long (station_id, variable_id, obs_time, value).
 
@@ -202,6 +232,9 @@ def melt(table, station_id: int, variable_ids: dict[str, int], value_type=None):
     caller. That only happens when the cached metadata is stale relative to the
     data service, which is itself worth knowing about, so it is reported rather
     than swallowed.
+
+    A cell the service sends in a shape we cannot read is dropped, loudly, and
+    on its own. It must never take the rest of the window with it.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -209,7 +242,15 @@ def melt(table, station_id: int, variable_ids: dict[str, int], value_type=None):
     from .schema import OBSERVATIONS, VALUE_TYPE
 
     value_type = value_type or VALUE_TYPE
-    times = table.column(TIME_COL)
+    # obs_time is non-nullable in OBSERVATIONS, so a row with no usable
+    # timestamp cannot be published at all; coerce once here and let the
+    # per-column validity mask below drop whatever did not survive.
+    times, bad_times = _coerce(table.column(TIME_COL), pa.timestamp("s"))
+    if bad_times:
+        log.warning(
+            "station %s: dropped %d row(s) with an unreadable %s",
+            station_id, bad_times, TIME_COL,
+        )
     parts: list[pa.Table] = []
     unknown: list[str] = []
     for name in table.schema.names:
@@ -219,9 +260,20 @@ def melt(table, station_id: int, variable_ids: dict[str, int], value_type=None):
         if vid is None:
             unknown.append(name)
             continue
-        values = table.column(name)
-        mask = pc.is_valid(values)
-        n = pc.sum(mask).as_py() or 0
+        mask = pc.and_(pc.is_valid(table.column(name)), pc.is_valid(times))
+        if (pc.sum(mask).as_py() or 0) == 0:
+            continue
+        kept_times = pc.filter(times, mask)
+        kept_values, bad = _coerce(pc.filter(table.column(name), mask), value_type)
+        if bad:
+            log.warning(
+                "station %s: dropped %d unreadable value(s) in column %r",
+                station_id, bad, name,
+            )
+            keep = pc.is_valid(kept_values)
+            kept_values = pc.filter(kept_values, keep)
+            kept_times = pc.filter(kept_times, keep)
+        n = len(kept_values)
         if n == 0:
             continue
         parts.append(
@@ -229,8 +281,8 @@ def melt(table, station_id: int, variable_ids: dict[str, int], value_type=None):
                 {
                     "station_id": pa.array([station_id] * n, pa.int32()),
                     "variable_id": pa.array([vid] * n, pa.int16()),
-                    "obs_time": pc.filter(times, mask).cast(pa.timestamp("s")),
-                    "value": pc.filter(values, mask).cast(value_type, safe=False),
+                    "obs_time": kept_times,
+                    "value": kept_values,
                 }
             )
         )
