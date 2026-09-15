@@ -6,17 +6,8 @@ and data. Everything that is pipeline machinery rather than published data lives
 under an underscore-prefixed directory, following the convention the spec itself
 uses for `_assets/`, so a validator walking `child` links never trips over it.
 
-    {root}/
-      catalog.json  README.md  AGENTS.md  DEVIATIONS.md  layout.json
-      networks/       collection.json + networks.parquet          (tabular)
-      variables/      collection.json + variables.parquet         (tabular)
-      stations/       collection.json + stations.parquet          (GeoParquet)
-      histories/      collection.json + histories.parquet         (GeoParquet)
-      observations/   collection.json + period=<p>/part-*.parquet (partitioned)
-      _assets/        logo, shared images
-      _manifest/      files.parquet, summary.json  (per-file stats for pruning)
-      _state/         watermarks.parquet
-      _staging/       delta/, compact/  (never published, never linked)
+The tree is drawn in README.md, under "Dataset layout". It is not repeated here:
+the two copies drifted apart while both claimed to be current.
 """
 
 from __future__ import annotations
@@ -40,7 +31,6 @@ SPATIAL_COLLECTIONS = (STATIONS, HISTORIES)
 MANIFEST = "_manifest"
 STATE = "_state"
 STAGING = "_staging"
-ASSETS = "_assets"
 
 DELTA = f"{STAGING}/delta"
 COMPACT_STAGING = f"{STAGING}/compact"
