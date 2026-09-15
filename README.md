@@ -383,9 +383,11 @@ the page at the real thing with
 
 What the page demonstrates is partition pruning, with the arithmetic on screen.
 Every query is logged with its SQL, its wall time, the partitions it could reach,
-and the bytes it pulled. Asking one station for 1997 reaches 1 of 20 objects and
-leaves 90% of the archive untouched; asking about 1872 to 1997 reaches all
-twenty, and the log says so.
+and the bytes it pulled. Against the currently published 20 objects, asking one
+station for 1997 reaches one of them and leaves 90% of the archive untouched;
+asking about 1872 to 1997 reaches all twenty, and the log says so. The counts
+come from `_manifest/files.parquet` at load time, so a re-partition changes what
+the page says without changing the page.
 
 The byte count is derived, not measured, and it is exact anyway: DuckDB fetches
 from inside a worker where Resource Timing does not reach, but it also pulls each
@@ -396,6 +398,13 @@ Year windows resolve to partition labels through `_manifest/files.parquet`
 rather than `layout.json`, because the manifest records the years each object
 actually holds while layout plans the entire walk, including years nobody has
 ingested yet. It is also the only one of the two that is published: see below.
+
+The whole view lives in the query string, so the address bar is the share
+button: variable, year window, network, station, panel, whether the map is
+coloured by mean, and the SQL in the console. A link opens on exactly what was
+shared, including the absence of the map scan; a bare link still gets the guided
+opening. Map framing is deliberately not in the URL, because the map refits
+whenever the station set changes and a restored viewport would fight it.
 
 Four panels share one year window and one variable: a station map coloured by
 each station's mean, a time series, a monthly climatology, and a SQL console over

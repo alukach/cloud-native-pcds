@@ -204,6 +204,33 @@ const BASE = (new URLSearchParams(location.search).get('base')
   || (LOCAL ? `${location.protocol}//${location.hostname}:8788/pcds/` : PUBLISHED)
 ).replace(/\/?$/, '/');
 
+/* ---------------------------------------------------------------- sharing */
+
+/** The whole view lives in the query string, so a link reproduces what the
+ *  sharer was looking at. Variables are named rather than indexed: an index into
+ *  the variables table would silently point somewhere else the next time a
+ *  network adds a sensor. */
+const START = new URLSearchParams(location.search);
+const VIEW_KEYS = ['var', 'y0', 'y1', 'net', 'st', 'tab', 'paint', 'sql'];
+const SHARED = VIEW_KEYS.some((k) => START.has(k));
+
+function writeUrl() {
+  if (!state.group) return;
+  const p = new URLSearchParams();
+  if (START.get('base')) p.set('base', START.get('base'));
+  p.set('var', [state.group.standard_name, state.group.cell_method ?? '', state.group.unit ?? ''].join('~'));
+  p.set('y0', $('y0').value);
+  p.set('y1', $('y1').value);
+  if ($('network').value) p.set('net', $('network').value);
+  if (state.station) p.set('st', state.station.station_id);
+  if (state.tab !== 'series') p.set('tab', state.tab);
+  if (state.paintedBy) p.set('paint', '1');
+  // A pasted query belongs in the link too, but not at any length: past a couple
+  // of kilobytes the URL stops surviving the trip through chat clients.
+  if (state.tab === 'sql' && state.lastSql && state.lastSql.length <= 1500) p.set('sql', state.lastSql);
+  history.replaceState(null, '', `${location.pathname}?${p}`);
+}
+
 const CAT = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 // Sequential blue for a dark surface runs dark -> light: near-zero recedes into
 // the basemap, high values pop off it. Celsius gets the diverging pair instead,
@@ -221,7 +248,7 @@ const state = {
   db: null, conn: null,
   summary: null, periods: [], byPeriod: new Map(), pulled: new Set(),
   groups: [], group: null,
-  stations: [], station: null,
+  stations: [], station: null, stationChosen: false,
   paintedBy: null,
   tab: 'series',
 };
@@ -382,7 +409,9 @@ async function boot() {
     SELECT period,
            min(year(obs_time_min)) AS start_year,
            max(year(obs_time_max)) AS end_year,
-           sum(file_bytes) AS bytes, sum(rows) AS rows,
+           -- sum() of a BIGINT widens to HUGEINT, which crosses into JS as a
+           -- string and turns every byte total into string concatenation.
+           sum(file_bytes)::BIGINT AS bytes, sum(rows)::BIGINT AS rows,
            list(path ORDER BY path) AS paths
     FROM files GROUP BY 1 ORDER BY start_year, end_year`);
   for (const p of state.periods) {
@@ -391,8 +420,8 @@ async function boot() {
   }
 
   const newest = state.periods[state.periods.length - 1];
-  $('y0').value = Math.max(yMin, newest.start_year);
-  $('y1').value = Math.min(yMax, newest.end_year);
+  $('y0').value = START.get('y0') ?? Math.max(yMin, newest.start_year);
+  $('y1').value = START.get('y1') ?? Math.min(yMax, newest.end_year);
 
   // One view over every partition object. hive_partitioning exposes `period`, and
   // a filter on it drops whole objects at bind time without opening them.
@@ -416,8 +445,11 @@ async function boot() {
   $('var-group').innerHTML = state.groups
     .map((g, i) => `<option value="${i}">${esc(g.display_name || g.standard_name)} — ${esc(shortCell(g.cell_method))} (${g.unit || '?'})</option>`)
     .join('');
-  const preferred = state.groups.findIndex(
-    (g) => g.standard_name === 'air_temperature' && g.cell_method === 'time: point');
+  const wanted = (START.get('var') ?? '').split('~');
+  const preferred = state.groups.findIndex((g) => START.has('var')
+    ? (g.standard_name === wanted[0] && (g.cell_method ?? '') === (wanted[1] ?? '')
+       && (g.unit ?? '') === (wanted[2] ?? ''))
+    : (g.standard_name === 'air_temperature' && g.cell_method === 'time: point'));
   $('var-group').value = String(preferred < 0 ? 0 : preferred);
   state.group = state.groups[preferred < 0 ? 0 : preferred];
 
@@ -425,13 +457,32 @@ async function boot() {
   $('network').insertAdjacentHTML('beforeend', nets
     .map((n) => `<option value="${esc(n.network_name)}">${esc(n.network_name)} (${fmtNum(n.station_count)})</option>`).join(''));
 
+  if (START.has('net')
+      && [...$('network').options].some((o) => o.value === START.get('net'))) {
+    $('network').value = START.get('net');
+  }
+  if (START.has('tab')) {
+    const b = document.querySelector(`.tabs [data-tab="${CSS.escape(START.get('tab'))}"]`);
+    if (b) {
+      state.tab = START.get('tab');
+      for (const o of document.querySelectorAll('.tabs [role=tab]')) o.setAttribute('aria-selected', String(o === b));
+    }
+  }
+  if (START.has('sql')) state.lastSql = START.get('sql');
+
   initMap();
   wireEvents();
   await refreshStations(true);
-  // One scan of the opening partition earns its keep three times over: it colours
-  // the map, it picks a station worth showing, and it leaves the object cached so
-  // every later query in this window costs nothing.
-  await paintByMean();
+  if (START.has('st')) {
+    state.stationChosen = true;
+    await selectStation(START.get('st'));
+  }
+  // A bare link gets the guided opening: one scan of the newest partition, which
+  // colours the map, picks a station worth showing, and leaves the object cached
+  // so every later query in this window costs nothing. A shared link gets exactly
+  // what was shared instead, including the absence of that scan.
+  if (SHARED ? START.get('paint') === '1' : true) await paintByMean();
+  writeUrl();
   setStatus('ready');
 }
 
@@ -608,8 +659,10 @@ async function refreshStations(fit = false) {
   }
   if (!state.stations.some((s) => s.station_id === state.station?.station_id)) {
     state.station = rows.slice().sort((a, b) => b.history_count - a.history_count)[0] ?? null;
+    state.stationChosen = false;
   }
   render();
+  writeUrl();
 }
 
 function renderStationList() {
@@ -626,10 +679,12 @@ function renderStationList() {
     </li>`).join('') || `<li class="meta" style="cursor:default;padding:8px">no stations match</li>`;
 }
 
-async function selectStation(id) {
+async function selectStation(id, chosen = true) {
   state.station = state.stations.find((s) => s.station_id === Number(id)) ?? state.station;
+  if (chosen) state.stationChosen = true;
   mapLoaded.then(() => map.setFilter('selected', ['==', ['get', 'station_id'], Number(id)]));
   await render();
+  writeUrl();
 }
 
 /* ------------------------------------------------------------------ panels */
@@ -655,6 +710,7 @@ function wireEvents() {
 
 async function render() {
   const panel = $('panel');
+  writeUrl();
   setStatus('querying', 'busy');
   try {
     if (state.tab === 'series') await renderSeries(panel);
@@ -859,9 +915,13 @@ async function paintByMean() {
     state.paintedBy = { label: state.group.display_name || state.group.standard_name, unit: state.group.unit };
     paintStations();
     renderStationList();
-    // Now that the rows are counted, prefer a station that actually reports here.
+    // Now that the rows are counted, prefer a station that actually reports here,
+    // unless the reader already picked one.
     const best = state.stations.filter((s) => s.painted_n).sort((a, b) => b.painted_n - a.painted_n)[0];
-    if (best && best.station_id !== state.station?.station_id) await selectStation(best.station_id);
+    if (!state.stationChosen && best && best.station_id !== state.station?.station_id) {
+      await selectStation(best.station_id, false);
+    }
+    writeUrl();
     setStatus('ready');
   } catch (err) {
     setStatus('query failed', 'error');
@@ -950,6 +1010,7 @@ async function runSql() {
     return;
   }
   setStatus('ready');
+  writeUrl();
   if (!rows.length) { out.innerHTML = `<p class="cap">0 rows.</p>`; return; }
 
   const cols = Object.keys(rows[0]);
