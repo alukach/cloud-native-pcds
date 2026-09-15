@@ -1,0 +1,26 @@
+# Incremental pull. Cadence comes from `pcds plan`:
+#   ~272k observations/day across ~950 actively reporting histories
+#   ~3 bytes/row packed  ->  ~800 KiB/day  ->  ~284 MiB/year
+# Daily is a freshness choice, not a sizing one: each run stages a small delta
+# file and compaction (quarterly) is what produces target-sized partitions.
+name: append
+
+on:
+  schedule:
+    - cron: "20 14 * * *"   # 14:20 UTC = 06:20 America/Vancouver (PDT)
+  workflow_dispatch:
+    inputs:
+      revision_window_days:
+        description: "Days of trailing data to re-read (PCDS revises observations)"
+        default: "30"
+
+jobs:
+  append:
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: >-
+        pcds append
+        --revision-window-days ${{ github.event.inputs.revision_window_days || '30' }}
+      timeout-minutes: 120
+      concurrency-group: pcds-write
+    secrets: inherit

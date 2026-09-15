@@ -1,0 +1,60 @@
+# Reusable setup + run wrapper. Every job goes through this so credentials,
+# caching and the dataset root are configured in exactly one place.
+name: run-pcds
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      timeout-minutes:
+        required: false
+        type: number
+        default: 60
+      concurrency-group:
+        required: false
+        type: string
+        default: pcds-write
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      # Serialize anything that writes: watermarks.parquet and the partition
+      # swap are both whole-object rewrites.
+      group: ${{ inputs.concurrency-group }}
+      cancel-in-progress: false
+    env:
+      PCDS_ROOT: ${{ vars.PCDS_ROOT }}
+      PCDS_S3_ENDPOINT: ${{ vars.PCDS_S3_ENDPOINT }}
+      PCDS_S3_REGION: ${{ vars.PCDS_S3_REGION }}
+      PCDS_BASE_URL: ${{ vars.PCDS_BASE_URL }}
+      PCDS_PUBLIC_S3_URI: ${{ vars.PCDS_PUBLIC_S3_URI }}
+      PCDS_HOST_NAME: ${{ vars.PCDS_HOST_NAME }}
+      PCDS_HOST_URL: ${{ vars.PCDS_HOST_URL }}
+      PCDS_HOST_EMAIL: ${{ vars.PCDS_HOST_EMAIL }}
+      PCDS_CONCURRENCY: ${{ vars.PCDS_CONCURRENCY || '4' }}
+      PCDS_MAX_RPS: ${{ vars.PCDS_MAX_RPS || '2' }}
+      PCDS_USER_AGENT: ${{ vars.PCDS_USER_AGENT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen || uv sync
+      # `command` reaches the shell through env rather than by interpolation:
+      # callers build it from workflow_dispatch inputs, and this step holds
+      # AWS_SECRET_ACCESS_KEY. Unquoted on purpose, since the command carries
+      # its own arguments.
+      - env:
+          PCDS_COMMAND: ${{ inputs.command }}
+        run: uv run $PCDS_COMMAND

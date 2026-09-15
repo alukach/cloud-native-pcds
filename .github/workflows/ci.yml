@@ -1,0 +1,22 @@
+# Tests and lint. Nothing here touches the network: the test suite works from
+# verbatim response captures in fixtures/, and the Portolan conformance test
+# builds a small catalog on disk and runs rashid against it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - run: uv run ruff check .
+      - run: uv run pytest -q

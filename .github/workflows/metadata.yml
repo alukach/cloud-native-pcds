@@ -1,0 +1,16 @@
+# The station catalog changes: networks add stations, histories get new
+# variables, obs time ranges advance. Refresh it before any ingest run.
+name: metadata
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"   # Mondays 12:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: pcds metadata
+      timeout-minutes: 20
+    secrets: inherit

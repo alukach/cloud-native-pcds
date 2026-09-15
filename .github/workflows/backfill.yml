@@ -1,0 +1,87 @@
+# Manual backfill. Runs across 8 station shards, each chunking its requests into
+# 5-year windows, so a failure costs one shard-window rather than the archive.
+# Each shard writes its own part files (s000-*, s001-*, ...); compaction merges.
+#
+# Proof of concept: start_year=2020. Then walk backwards 2015, 2010, ... 1870.
+name: backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: "First year, inclusive"
+        required: true
+        default: "2020"
+      end_year:
+        description: "Last year, inclusive"
+        required: true
+        default: "2026"
+      networks:
+        description: "Comma-separated network names; empty = all 22"
+        default: ""
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      # Keep total concurrency against PCIC modest: shards x PCDS_CONCURRENCY.
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      PCDS_ROOT: ${{ vars.PCDS_ROOT }}
+      PCDS_S3_ENDPOINT: ${{ vars.PCDS_S3_ENDPOINT }}
+      PCDS_S3_REGION: ${{ vars.PCDS_S3_REGION }}
+      PCDS_CONCURRENCY: "3"
+      PCDS_MAX_RPS: "1.5"
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen || uv sync
+      - name: Backfill shard ${{ matrix.shard }}
+        # Dispatch inputs go through env, not straight into the shell: this step
+        # has AWS_SECRET_ACCESS_KEY in scope.
+        env:
+          START_YEAR: ${{ github.event.inputs.start_year }}
+          END_YEAR: ${{ github.event.inputs.end_year }}
+          NETWORKS: ${{ github.event.inputs.networks }}
+        run: |
+          uv run pcds backfill \
+            --start-year "$START_YEAR" \
+            --end-year "$END_YEAR" \
+            --networks "$NETWORKS" \
+            --shard ${{ matrix.shard }}/8
+
+  compact:
+    needs: shard
+    if: always()
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: pcds compact --no-clear
+      timeout-minutes: 350
+    secrets: inherit
+
+  catalog:
+    needs: compact
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: pcds catalog
+      timeout-minutes: 30
+    secrets: inherit
+
+  portolan:
+    needs: catalog
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: >-
+        pcds portolan
+        --base-url "${{ vars.PCDS_BASE_URL }}"
+        --s3-uri "${{ vars.PCDS_PUBLIC_S3_URI }}"
+      timeout-minutes: 30
+    secrets: inherit
