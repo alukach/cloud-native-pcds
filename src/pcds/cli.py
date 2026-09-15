@@ -268,9 +268,9 @@ def backfill(
     for r in pending.values():  # anything left (shouldn't happen, but be safe)
         flush(r.target.station_id, r.table)
 
-    paths = [p for w in writers.values() for p in w.close()]
+    written = [p for w in writers.values() for p in w.close()]
     marks.save(store)
-    log.info("wrote %d rows across %d files; %d station failures", total_rows, len(paths), failures)
+    log.info("wrote %d rows across %d files; %d station failures", total_rows, len(written), failures)
     if failures:
         raise typer.Exit(code=1 if failures > len(targets) // 10 else 0)
 
