@@ -471,6 +471,15 @@ def portolan(
         raise typer.BadParameter(
             "the host provider MUST be contactable: pass --host-url or --host-email"
         )
+    if cfg.base_url and not cfg.s3_uri and store.exists(paths.OBSERVATIONS):
+        # partition:glob would come out as https://..., which no reader can expand:
+        # globbing needs a LIST and plain https has none. PORTO-FMT-020 exempts the
+        # glob from the https-only rule precisely so it can be s3://.
+        raise typer.BadParameter(
+            "--base-url without --s3-uri would publish an https partition:glob, which "
+            "cannot be expanded (glob expansion needs a bucket listing). Pass --s3-uri, "
+            "or drop --base-url for a relative local build."
+        )
     report = build(store, SETTINGS, cfg)
     print(json.dumps(report, indent=2))
 
