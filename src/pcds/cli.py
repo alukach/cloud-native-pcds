@@ -374,6 +374,11 @@ def compact(
     store = _store(root)
     lay = _layout(store)
     periods = [p.strip() for p in period.split(",") if p.strip()] or None
+    # Only the auto path derives its periods *from* the deltas, so only it can
+    # prove it folded all of them. Clearing after an explicitly scoped run would
+    # delete rows for every other period unread, and the watermarks have already
+    # advanced past them, so `append` will not fetch them again.
+    targeted = periods is not None
 
     if periods is None:
         # Only touch partitions that actually have new data.
@@ -399,7 +404,14 @@ def compact(
     stats = compact_all(store, SETTINGS, lay, periods)
     for s in stats:
         log.info("%s", s)
-    if clear:
+    if clear and targeted:
+        log.warning(
+            "keeping staged deltas: --period %s compacted only some of them, and "
+            "clearing would drop rows for the rest. Re-run without --period to fold "
+            "and clear everything.",
+            period,
+        )
+    elif clear:
         removed = clear_deltas(store)
         log.info("removed %d delta files", removed)
 
