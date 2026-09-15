@@ -14,17 +14,17 @@ The upstream source is an OPeNDAP (Pydap) service that serves one wide CSV per s
 
 Six steps, one CLI command each.
 
-**1. Metadata** (`pcds metadata`, weekly) pulls the five JSON endpoints and writes them as small Parquet tables. Everything downstream joins against these: station ids, which variables exist, who reports what. `stations` and `histories` carry lat/lon and become GeoParquet.
+1. **Metadata** (`pcds metadata`, weekly) pulls the five JSON endpoints and writes them as small Parquet tables. Everything downstream joins against these: station ids, which variables exist, who reports what. `stations` and `histories` carry lat/lon and become GeoParquet.
 
-**2. Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`.
+2. **Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`.
 
-**3. Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a shared token bucket capped at 2 req/s. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`. Per-station watermarks in `_state/` make a crashed run resume rather than restart. `append` starts from each watermark *minus 30 days*, because PCDS observations are explicitly preliminary and get revised for weeks after the fact; append-only would silently bake in wrong values.
+3. **Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a shared token bucket capped at 2 req/s. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`. Per-station watermarks in `_state/` make a crashed run resume rather than restart. `append` starts from each watermark *minus 30 days*, because PCDS observations are explicitly preliminary and get revised for weeks after the fact; append-only would silently bake in wrong values.
 
-**4. Write** (`pack.py`) emits Parquet sorted by `(station_id, variable_id, obs_time)`, with dictionary-encoded ids, delta-packed timestamps, zstd, a page index and 150,000-row row groups. The sort is what makes the statistics selective, so a reader after one station skips nearly every row group. Daily appends do not write into the partitions; they drop a small *delta* into `_staging/delta/`, because at ~800 KiB/day you would wait most of a year to fill one properly sized file.
+4. **Write** (`pack.py`) emits Parquet sorted by `(station_id, variable_id, obs_time)`, with dictionary-encoded ids, delta-packed timestamps, zstd, a page index and 150,000-row row groups. The sort is what makes the statistics selective, so a reader after one station skips nearly every row group. Daily appends do not write into the partitions; they drop a small *delta* into `_staging/delta/`, because at ~800 KiB/day you would wait most of a year to fill one properly sized file.
 
-**5. Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
+5. **Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
 
-**6. Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order, duplicate keys and file sizes. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
+6. **Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order, duplicate keys and file sizes. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
 
 The result is five published collections (`observations`, `stations`, `histories`, `variables`, `networks`) plus three underscore-prefixed directories that are pipeline machinery rather than data: `_manifest/`, `_state/` and `_staging/`. Paths are defined in `src/pcds/paths.py` and nowhere else.
 
@@ -307,11 +307,11 @@ recent years stand alone (`period=2025`), sparse history is bucketed
 (`period=1872-1903`). Comparing it to a year is silently wrong rather than an
 error:
 
-| Query | What you get |
-| --- | --- |
-| `WHERE period = '1890'` | **0 rows, no error.** 1890 lives in `period=1872-1903`. |
-| `WHERE period >= '1900'` | **Drops 1900 to 1903.** As strings, `'1872-1903'` sorts below `'1900'`, so the bucket containing those years is excluded. |
-| `WHERE obs_time >= '2024-01-01' AND obs_time < '2025-01-01'` | Correct, but reads **every** partition. |
+| Query                                                        | What you get                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `WHERE period = '1890'`                                      | **0 rows, no error.** 1890 lives in `period=1872-1903`.                                                                   |
+| `WHERE period >= '1900'`                                     | **Drops 1900 to 1903.** As strings, `'1872-1903'` sorts below `'1900'`, so the bucket containing those years is excluded. |
+| `WHERE obs_time >= '2024-01-01' AND obs_time < '2025-01-01'` | Correct, but reads **every** partition.                                                                                   |
 
 Resolve years to labels through `layout.json`, as `periods_for()` above does.
 The subquery is pushed into Hive partition pruning, so a range inside one bucket
