@@ -71,7 +71,9 @@ def plan(
 ):
     """Measure arrival rate and byte cost; recommend append/compaction cadence."""
     _setup(verbose=False)
-    from . import catalog, metadata as md, plan as planner
+    from . import catalog
+    from . import metadata as md
+    from . import plan as planner
 
     store = _store(root)
     histories = md.load(store, "histories").to_pylist()
@@ -109,7 +111,9 @@ def layout(
 ):
     """(Re)plan the period partitioning so every partition clears the size floor."""
     _setup()
-    from . import catalog, metadata as md, plan as planner
+    from . import catalog
+    from . import metadata as md
+    from . import plan as planner
 
     store = _store(root)
     end_year = end_year or dt.date.today().year + 1

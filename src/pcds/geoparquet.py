@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import struct
-from typing import Iterable
+from collections.abc import Iterable
 
 GEOPARQUET_VERSION = "1.1.0"
 GEOMETRY_COLUMN = "geometry"
@@ -127,12 +127,12 @@ def to_geoparquet(table, lon_column: str = "lon", lat_column: str = "lat"):
 
     lons = table.column(lon_column).to_pylist()
     lats = table.column(lat_column).to_pylist()
-    order = hilbert_order(zip(lons, lats))
+    order = hilbert_order(zip(lons, lats, strict=True))
     table = table.take(pa.array(order, pa.int32()))
 
     lons = table.column(lon_column).to_pylist()
     lats = table.column(lat_column).to_pylist()
-    geoms = [None if x is None or y is None else wkb_point(x, y) for x, y in zip(lons, lats)]
+    geoms = [None if x is None or y is None else wkb_point(x, y) for x, y in zip(lons, lats, strict=True)]
     bbox_struct = pa.StructArray.from_arrays(
         [
             pa.array(lons, pa.float64()),
@@ -146,7 +146,7 @@ def to_geoparquet(table, lon_column: str = "lon", lat_column: str = "lat"):
         pa.field(GEOMETRY_COLUMN, pa.binary(), nullable=True), pa.array(geoms, pa.binary())
     ).append_column(pa.field(BBOX_COLUMN, bbox_struct.type, nullable=True), bbox_struct)
 
-    present = [(x, y) for x, y in zip(lons, lats) if x is not None and y is not None]
+    present = [(x, y) for x, y in zip(lons, lats, strict=True) if x is not None and y is not None]
     if present:
         xs = [p[0] for p in present]
         ys = [p[1] for p in present]

@@ -18,8 +18,8 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .config import Settings
 from . import paths
+from .config import Settings
 from .schema import HISTORIES, NETWORKS, STATIONS, VARIABLES
 from .storage import Store
 
@@ -178,7 +178,13 @@ def write(store: Store, tables: dict[str, pa.Table], frequencies: list[str]) -> 
         if collection in paths.SPATIAL_COLLECTIONS:
             geo, _bbox = to_geoparquet(table)
             write_geoparquet(store, target, geo)
-            coords = list(zip(table.column("lon").to_pylist(), table.column("lat").to_pylist()))
+            coords = list(
+                zip(
+                    table.column("lon").to_pylist(),
+                    table.column("lat").to_pylist(),
+                    strict=True,
+                )
+            )
             with store.fs.open_output_stream(
                 store.join(collection, paths.THUMBNAIL)
             ) as sink:

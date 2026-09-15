@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "rashid>=0.1.8,<0.2.0"]
 
 [project.scripts]
 pcds = "pcds.cli:app"
@@ -25,3 +25,8 @@ packages = ["src/pcds"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+# Pinned explicitly: ruff's implicit default rule set widens between releases,
+# so an unpinned `ruff check` goes from clean to dozens of findings on upgrade.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

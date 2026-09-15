@@ -82,11 +82,11 @@ class Layout:
         self.periods = sorted(periods, key=lambda p: p.start_year)
 
     @classmethod
-    def yearly(cls, start: int, end: int) -> "Layout":
+    def yearly(cls, start: int, end: int) -> Layout:
         return cls([Period(str(y), y, y) for y in range(start, end + 1)])
 
     @classmethod
-    def from_json(cls, blob: bytes | str) -> "Layout":
+    def from_json(cls, blob: bytes | str) -> Layout:
         data = json.loads(blob)
         return cls([Period(**p) for p in data["periods"]])
 

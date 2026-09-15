@@ -20,7 +20,7 @@ def test_chunks_are_contiguous_and_cover_the_range():
     lo, hi = dt.datetime(1872, 1, 1), dt.datetime(2026, 9, 11)
     chunks = list(chunk_ranges(lo, hi, 5))
     assert chunks[0][0] == lo and chunks[-1][1] == hi
-    for a, b in zip(chunks, chunks[1:]):
+    for a, b in zip(chunks, chunks[1:], strict=False):
         assert a[1] == b[0]
 
 

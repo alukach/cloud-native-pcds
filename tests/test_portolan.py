@@ -12,8 +12,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-import pytest
-
 from pcds import paths
 from pcds.portolan import (
     DEVIATIONS,
@@ -221,9 +219,9 @@ def test_metadata_collection_is_valid_portolan():
     assert col["providers"][-1].get("url") or col["providers"][-1].get("email")
     # a mirror records its sync time and points back at the source
     assert col["updated"].startswith("2026-09-15")
-    rels = {l["rel"] for l in col["links"]}
+    rels = {ln["rel"] for ln in col["links"]}
     assert {"root", "parent", "describedby", "agents", "via", "license", "self"} <= rels
-    assert all(l.get("type") for l in col["links"])
+    assert all(ln.get("type") for ln in col["links"])
 
 
 def test_spatial_extent_comes_from_the_data_and_ignores_null_coords():
@@ -327,17 +325,17 @@ def test_table_columns_uses_descriptions_where_given():
 def test_root_catalog_links_every_child_with_a_title():
     cat = build_root_catalog(cfg(), [("stations", "Weather Stations"),
                                      ("observations", "Station Observations")])
-    children = [l for l in cat["links"] if l["rel"] == "child"]
+    children = [ln for ln in cat["links"] if ln["rel"] == "child"]
     assert len(children) == 2
-    assert all(l["title"] and l["type"] == JSON_TYPE for l in children)
-    self_link = next(l for l in cat["links"] if l["rel"] == "self")
+    assert all(ln["title"] and ln["type"] == JSON_TYPE for ln in children)
+    self_link = next(ln for ln in cat["links"] if ln["rel"] == "self")
     assert self_link["href"] == f"{BASE}/catalog.json"
-    assert {"describedby", "agents", "root", "via"} <= {l["rel"] for l in cat["links"]}
+    assert {"describedby", "agents", "root", "via"} <= {ln["rel"] for ln in cat["links"]}
 
 
 def test_root_catalog_without_base_url_has_no_self_link():
     cat = build_root_catalog(cfg(base_url=""), [])
-    assert not any(l["rel"] == "self" for l in cat["links"])
+    assert not any(ln["rel"] == "self" for ln in cat["links"])
 
 
 # ------------------------------------------------------------------- docs ----

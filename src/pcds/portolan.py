@@ -349,7 +349,7 @@ def _base_collection(
     return col
 
 
-def _file_facts(store: "Store", path: str, *, hash_bytes: bool) -> tuple[int | None, str | None]:
+def _file_facts(store: Store, path: str, *, hash_bytes: bool) -> tuple[int | None, str | None]:
     """file:size and file:checksum, which are SHOULDs worth honouring for small
     assets. Big partition files are skipped: a stale checksum is worse than none,
     and hashing 10 GB on every catalog build buys nothing."""
@@ -379,7 +379,7 @@ def _s3(cfg: CatalogConfig, *parts: str) -> str | None:
 
 
 def build_metadata_collection(
-    store: "Store",
+    store: Store,
     cfg: CatalogConfig,
     collection: str,
     table,
@@ -503,7 +503,7 @@ def build_metadata_collection(
 
 
 def build_observations_collection(
-    store: "Store",
+    store: Store,
     cfg: CatalogConfig,
     *,
     summary: dict | None,
@@ -874,7 +874,7 @@ def collection_agents(cid: str, col: dict, cfg: CatalogConfig) -> str:
             "The spatial entry point. Filter this table first, then push `station_id`",
             "into the observation scan.",
             "",
-            f"- `network_name` + `native_id` is how humans name a station upstream.",
+            "- `network_name` + `native_id` is how humans name a station upstream.",
             "- `station_id` is what `observations` joins on.",
             "- `variable_ids` tells you what a station reports before you query for it.",
             "- `min_obs_time` / `max_obs_time` bound what exists; a station whose",
@@ -973,16 +973,16 @@ def deviations_md(cfg: CatalogConfig) -> str:
 # ------------------------------------------------------------------- write --
 
 
-def _write_text(store: "Store", path: str, text: str) -> None:
+def _write_text(store: Store, path: str, text: str) -> None:
     with store.fs.open_output_stream(store.join(path)) as sink:
         sink.write(text.encode())
 
 
-def _write_json(store: "Store", path: str, obj: dict) -> None:
+def _write_json(store: Store, path: str, obj: dict) -> None:
     _write_text(store, path, json.dumps(obj, indent=2) + "\n")
 
 
-def build(store: "Store", settings: "Settings", cfg: CatalogConfig) -> dict:
+def build(store: Store, settings: Settings, cfg: CatalogConfig) -> dict:
     """Write the whole Portolan tree over an existing dataset. Idempotent."""
     import json as _json
 
