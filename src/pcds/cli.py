@@ -319,6 +319,30 @@ def backfill(
 # ------------------------------------------------------------------ append --
 
 
+def append_window(
+    watermark: dt.datetime | None,
+    now: dt.datetime,
+    window: dt.timedelta,
+    active_days: int,
+) -> tuple[dt.datetime, dt.datetime, bool]:
+    """The (start, end, start_inclusive) an increment should ask a station for.
+
+    Both bounds are always set. `fetch_chunked` skips chunking entirely when
+    either is None, and an unbounded full-station request is the one shape the
+    lister cannot serve: it can exceed 45s, and the whole response is buffered
+    before anything is written.
+
+    With a watermark, re-read the trailing revision window, because PCDS is
+    preliminary and late or corrected observations are normal; the compactor
+    dedupes. Without one, the station has never been ingested, and filling in
+    its archive is `pcds backfill`'s job, so ask only for the span an increment
+    is responsible for: a station reaches append at all only if it reported
+    within `active_days`.
+    """
+    start = (watermark - window) if watermark else now - dt.timedelta(days=active_days) - window
+    return (start, now, False)
+
+
 @app.command()
 def append(
     root: str = typer.Option(None),
@@ -360,11 +384,7 @@ def append(
     log.info("append: polling %d stations", len(targets))
 
     def win(t: Target):
-        wm = marks.watermark(t.station_id)
-        # Re-read the trailing revision window: PCDS is preliminary data and
-        # late/corrected observations are normal. The compactor dedupes.
-        start = (wm - window) if wm else None
-        return (start, None, False)
+        return append_window(marks.watermark(t.station_id), now, window, active_days)
 
     run_id = run_id or now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     tables = []
