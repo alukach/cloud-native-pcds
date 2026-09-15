@@ -1,14 +1,22 @@
 """Per-station ingest watermarks, stored beside the data.
 
 GitHub Actions runners are ephemeral, so the state lives in object storage:
-``state/watermarks.parquet``. It is small (one row per station, ~7k rows) and is
-rewritten whole on every run -- cheap, and it sidesteps concurrent-append
-headaches entirely as long as only one ingest job runs at a time.
+``_state/watermarks*.parquet``. It is small (one row per station, ~7k rows) and
+is rewritten whole on every run, which is cheap.
+
+A whole-object rewrite is only safe when one writer runs at a time, and the
+backfill matrix deliberately runs 8 shards at once: they would each load the
+same snapshot, and the last to finish would silently drop the other seven. So a
+writer that shares the prefix writes its *own* file and `load` merges them.
+Merging is well defined without coordination because the rows are keyed by
+station_id and the later watermark always wins, so the result does not depend on
+which shard finished first.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -18,6 +26,22 @@ from .schema import WATERMARKS
 from .storage import Store
 
 PATH = (paths.STATE, "watermarks.parquet")
+PREFIX = "watermarks"
+
+
+def _filename(writer: str | None) -> str:
+    return f"{PREFIX}.parquet" if writer is None else f"{PREFIX}-{writer}.parquet"
+
+
+def _merge(into: dict[int, dict], row: dict) -> None:
+    """Later watermark wins, so the merge does not depend on file order."""
+    current = into.get(row["station_id"])
+    if current is None:
+        into[row["station_id"]] = row
+        return
+    a, b = current["watermark"], row["watermark"]
+    if a is None or (b is not None and b > a):
+        into[row["station_id"]] = row
 
 
 class Watermarks:
@@ -25,23 +49,32 @@ class Watermarks:
         self.rows = rows
 
     @classmethod
-    def load(cls, store: Store) -> "Watermarks":
-        if not store.exists(*PATH):
-            return cls({})
-        with store.fs.open_input_file(store.join(*PATH)) as f:
-            table = pq.read_table(f)
-        return cls({r["station_id"]: r for r in table.to_pylist()})
+    def load(cls, store: Store) -> Watermarks:
+        rows: dict[int, dict] = {}
+        for info in store.ls(paths.STATE):
+            name = info.path.rsplit("/", 1)[-1]
+            if not (name.startswith(PREFIX) and name.endswith(".parquet")):
+                continue
+            with store.fs.open_input_file(info.path) as f:
+                for row in pq.read_table(f).to_pylist():
+                    _merge(rows, row)
+        return cls(rows)
 
-    def save(self, store: Store) -> None:
+    def save(self, store: Store, writer: str | None = None) -> None:
+        """Persist. `writer` names a concurrent writer (a backfill shard); without
+        it this rewrites the single shared file, which only one job may do."""
         store.mkdirs(paths.STATE)
         table = pa.Table.from_pylist(
             sorted(self.rows.values(), key=lambda r: r["station_id"]), schema=WATERMARKS
         )
+        name = _filename(writer)
         # Write to a sibling then move, so a crashed run never leaves a torn file.
-        tmp = store.join(paths.STATE, "watermarks.parquet.tmp")
+        # The temp name carries the writer too: a shared one would let two shards
+        # interleave their bytes into a single object and then publish it.
+        tmp = store.join(paths.STATE, f"{name}.{os.getpid()}.tmp")
         with store.fs.open_output_stream(tmp) as sink:
             pq.write_table(table, sink, compression="zstd")
-        final = store.join(*PATH)
+        final = store.join(paths.STATE, name)
         try:
             store.fs.move(tmp, final)
         except Exception:  # some object stores lack atomic move; copy semantics

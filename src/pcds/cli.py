@@ -269,7 +269,9 @@ def backfill(
         flush(r.target.station_id, r.table)
 
     written = [p for w in writers.values() for p in w.close()]
-    marks.save(store)
+    # Shards run concurrently (backfill.yml runs 8, four at a time), so each
+    # writes its own watermark file rather than racing on one shared object.
+    marks.save(store, writer=shard_tag if n > 1 else None)
     log.info("wrote %d rows across %d files; %d station failures", total_rows, len(written), failures)
     if failures:
         raise typer.Exit(code=1 if failures > len(targets) // 10 else 0)

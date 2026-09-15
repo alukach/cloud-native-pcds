@@ -40,3 +40,61 @@ def test_failures_accumulate_then_quarantine_then_reset():
 
 def test_unknown_station_has_no_watermark():
     assert Watermarks({}).watermark(999) is None
+
+
+# ------------------------------------------------- concurrent shard writers --
+
+
+def _store(tmp_path):
+    from pcds.config import Settings
+    from pcds.storage import open_store
+
+    return open_store(Settings(root=str(tmp_path)))
+
+
+def test_concurrent_shards_do_not_lose_each_others_watermarks(tmp_path):
+    """8 shards saving at once must not end up as one shard's snapshot.
+
+    Each writes its own file; `load` merges them. Station ids are disjoint
+    across shards, so nothing here depends on who finished first.
+    """
+    store = _store(tmp_path)
+    now = dt.datetime(2026, 9, 14)
+    for shard in range(8):
+        marks = Watermarks.load(store)  # every shard starts from the same snapshot
+        station = 100 + shard
+        marks.record_success(
+            station, "EC_raw", f"S{station}",
+            max_obs_time=dt.datetime(2026, 1, 1 + shard), rows=10, now=now,
+        )
+        marks.save(store, writer=f"s{shard:03d}")
+
+    merged = Watermarks.load(store)
+    assert sorted(merged.rows) == [100 + s for s in range(8)]
+    assert merged.watermark(107) == dt.datetime(2026, 1, 8)
+
+
+def test_temp_files_are_not_shared_between_writers(tmp_path):
+    """A shared .tmp name lets two shards interleave bytes into one object."""
+    store = _store(tmp_path)
+    marks = Watermarks({})
+    marks.record_success(
+        1, "EC_raw", "S1", max_obs_time=dt.datetime(2026, 1, 1), rows=1,
+        now=dt.datetime(2026, 9, 14),
+    )
+    marks.save(store, writer="s000")
+    marks.save(store, writer="s001")
+    names = {i.path.rsplit("/", 1)[-1] for i in store.ls("_state")}
+    assert names == {"watermarks-s000.parquet", "watermarks-s001.parquet"}
+
+
+def test_later_watermark_wins_when_files_overlap(tmp_path):
+    """An un-sharded `append` file and a shard file can both hold a station."""
+    store = _store(tmp_path)
+    now = dt.datetime(2026, 9, 14)
+    for writer, when in (("s000", dt.datetime(2026, 1, 1)), (None, dt.datetime(2026, 6, 1))):
+        marks = Watermarks({})
+        marks.record_success(7, "EC_raw", "S7", max_obs_time=when, rows=1, now=now)
+        marks.save(store, writer=writer)
+
+    assert Watermarks.load(store).watermark(7) == dt.datetime(2026, 6, 1)
