@@ -52,3 +52,15 @@ jobs:
       timeout-minutes: 30
       concurrency-group: pcds-verify
     secrets: inherit
+
+  # rashid was already a dev dep but only ever ran in pytest over a synthetic
+  # catalog; nothing had validated the real one. Needs a script because rashid
+  # wants a local tree and _setup.yml takes a single command.
+  conformance:
+    needs: portolan
+    uses: ./.github/workflows/_setup.yml
+    with:
+      command: bash scripts/conformance.sh
+      timeout-minutes: 30
+      concurrency-group: pcds-verify
+    secrets: inherit
