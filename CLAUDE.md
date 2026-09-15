@@ -32,7 +32,7 @@ made from it was made on a false premise. Numbers below are from `logs/` and
   default rather than an oversight, but it contradicts the Constraints section
   below, which is the part a reader is likely to trust. Decide which one is the
   policy before the next walk.
-- 144 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
+- 145 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
   small catalog on disk and runs a real `rashid check` over it.
 - `ruff check .` is clean. The lint rule set is pinned explicitly in
   `pyproject.toml`; ruff's implicit default widens between releases and took the
@@ -87,7 +87,7 @@ Do not relitigate these without a reason; each was argued through once.
 | Plan the layout once, before the walk | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity and nothing repairs it afterwards. Re-planning once data exists moves boundaries under written partitions and orphans them; `pcds layout` warns which ones. Re-plan when the walk is done, and re-backfill the years whose boundaries moved. |
 | 30-day trailing re-read | PCDS is explicitly preliminary. Observations get corrected and late data arrives for weeks. Append-only would bake in wrong values. |
 | 150k-row row groups | ~450 KiB compressed, a sensible floor for a range request, and it matches Portolan's GeoParquet cap so one fewer thing to explain. |
-| Portolan, knowingly non-conformant | Two MUSTs cannot be met by a large time-partitioned non-spatial table. See `DEVIATIONS.md` in built output and `src/pcds/portolan.py::DEVIATIONS`. |
+| Portolan, knowingly non-conformant | Two MUSTs cannot be met by a large time-partitioned non-spatial table. See `DEVIATIONS.md` in built output and `src/pcds/docs.py::DEVIATIONS`. |
 | Hand-rolled GeoParquet and PNG | 7k points does not justify geopandas; a scatter plot does not justify matplotlib in CI. Both are ~100 lines and tested. |
 
 ## Upstream gotchas
@@ -164,9 +164,10 @@ in `.github/workflows/`.
   commit, and check the claims either side of the line you are editing while
   you are there.
 - Comments explain *why*, not *what*. The modules are written to be read in
-  order: `opendap` → `ingest` → `pack` → `compact` → `portolan`.
+  order: `opendap` → `ingest` → `pack` → `compact` → `portolan`. `docs` is an
+  appendix to `portolan`: all the prose, and the deviation register.
 - Paths live in `src/pcds/paths.py`. Do not hardcode prefixes anywhere else.
-- New Portolan deviations go in `src/pcds/portolan.py::DEVIATIONS` with a stable
+- New Portolan deviations go in `src/pcds/docs.py::DEVIATIONS` with a stable
   requirement ID, never as a silent omission.
 
 ## Next
