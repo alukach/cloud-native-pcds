@@ -71,6 +71,9 @@ Every one of these cost real time to find. They are pinned in
 - Timestamps are **naive local standard time**, not UTC. `histories.tz_offset`
   has the offset where upstream knows it, which is not everywhere. Do not
   localize silently.
+- The `frequencies` endpoint returns a **literal `null`** in its list, for
+  histories whose reporting frequency upstream does not know. It is not a
+  frequency code; `metadata.write` drops it before sorting.
 - `variable_id` is **network-scoped**. Air temperature has a different id in each
   of the 22 networks. Select on `standard_name` + `cell_method`.
 - `period` is an **opaque partition label, not a year**, and comparing it to one
