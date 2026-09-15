@@ -81,7 +81,7 @@ jobs:
     with:
       command: >-
         pcds portolan
-        --base-url "${{ vars.PCDS_BASE_URL }}"
-        --s3-uri "${{ vars.PCDS_PUBLIC_S3_URI }}"
+        --base-url ${{ vars.PCDS_BASE_URL }}
+        --s3-uri ${{ vars.PCDS_PUBLIC_S3_URI }}
       timeout-minutes: 30
     secrets: inherit

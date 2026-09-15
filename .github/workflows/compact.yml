@@ -18,7 +18,8 @@ jobs:
     uses: ./.github/workflows/_setup.yml
     with:
       command: >-
-        pcds compact --period "${{ github.event.inputs.period || '' }}"
+        pcds compact
+        ${{ github.event.inputs.period && format('--period {0}', github.event.inputs.period) || '' }}
       timeout-minutes: 240
       concurrency-group: pcds-write
     secrets: inherit
@@ -39,8 +40,8 @@ jobs:
     with:
       command: >-
         pcds portolan
-        --base-url "${{ vars.PCDS_BASE_URL }}"
-        --s3-uri "${{ vars.PCDS_PUBLIC_S3_URI }}"
+        --base-url ${{ vars.PCDS_BASE_URL }}
+        --s3-uri ${{ vars.PCDS_PUBLIC_S3_URI }}
       timeout-minutes: 30
     secrets: inherit
 
