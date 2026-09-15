@@ -26,7 +26,11 @@ SHARDS="${SHARDS:-8}"
 mkdir -p logs
 
 while read -r period y0 y1; do
-    if compgen -G "$PCDS_ROOT/observations/period=$period/part-*.parquet" >/dev/null; then
+    # _SUCCESS is written as the commit point of the partition swap, so it means
+    # "compacted and complete". A part-*.parquet glob does not: a partition left
+    # half-written by an interrupted run also matches it, and would then be
+    # skipped on every future pass with its rows missing and nothing to say so.
+    if [ -f "$PCDS_ROOT/observations/period=$period/_SUCCESS" ]; then
         echo "== $period: done, skipping"
         continue
     fi
@@ -38,7 +42,7 @@ while read -r period y0 y1; do
         exit 1
     fi
     # Compacting here does double duty: it merges the per-shard files, and the
-    # part-*.parquet it leaves behind is the marker the skip above looks for.
+    # _SUCCESS it leaves behind is the marker the skip above looks for.
     uv run pcds compact --period "$period" || {
         echo "!! $period: compact failed"
         exit 1

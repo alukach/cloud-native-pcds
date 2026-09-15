@@ -40,6 +40,12 @@ MANIFEST_FILE = f"{MANIFEST}/files.parquet"
 SUMMARY_FILE = f"{MANIFEST}/summary.json"
 WATERMARKS_FILE = f"{STATE}/watermarks.parquet"
 
+# Written as the last step of a compaction, naming the generation that is now
+# current. It is the commit point of the partition swap, so its absence or a
+# stale generation inside it is what tells the next run to roll back. Not a
+# `.parquet`, so no data glob picks it up.
+SUCCESS = "_SUCCESS"
+
 THUMBNAIL = "thumbnail.png"
 README = "README.md"
 AGENTS = "AGENTS.md"
@@ -50,6 +56,10 @@ CATALOG_JSON = "catalog.json"
 
 def period_prefix(period: str) -> str:
     return f"{OBSERVATIONS}/period={period}"
+
+
+def period_success(period: str) -> str:
+    return f"{period_prefix(period)}/{SUCCESS}"
 
 
 def metadata_file(collection: str) -> str:

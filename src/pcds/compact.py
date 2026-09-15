@@ -20,7 +20,9 @@ DELTA_BINARY_PACKED on obs_time) are not reachable through DuckDB's COPY.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import uuid
 
 import pyarrow as pa
 
@@ -88,6 +90,66 @@ def _glob(store: Store, prefix: str) -> str:
     return f"{base.rstrip('/')}/{prefix.strip('/')}/**/*.parquet"
 
 
+def _generation(path: str) -> str:
+    """The generation tag in `part-<gen>-NNNNN.parquet`, or "" for a file
+    written before generations existed (`part-NNNNN.parquet`)."""
+    stem = path.rsplit("/", 1)[-1].removesuffix(".parquet")
+    bits = stem.split("-")
+    return bits[1] if len(bits) == 3 else ""
+
+
+def _parquet_files(store: Store, prefix: str) -> list[str]:
+    return [i.path for i in store.ls(prefix, recursive=True) if i.path.endswith(".parquet")]
+
+
+def _committed_generation(store: Store, period: str) -> str | None:
+    marker = paths.period_success(period)
+    if not store.exists(marker):
+        return None
+    try:
+        with store.fs.open_input_stream(store.join(marker)) as f:
+            return json.loads(f.read().decode())["generation"]
+    except (ValueError, KeyError, OSError):
+        # An unreadable marker means we cannot tell which generation is current,
+        # so leave every file alone rather than guess and delete the live one.
+        return None
+
+
+def _write_success(store: Store, period: str, generation: str, *, rows: int, files: int) -> None:
+    payload = {
+        "generation": generation,
+        "rows": rows,
+        "files": files,
+        "completed_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat(),
+    }
+    with store.fs.open_output_stream(store.join(paths.period_success(period))) as f:
+        f.write(json.dumps(payload, indent=2).encode())
+
+
+def reconcile_period(store: Store, period: str) -> int:
+    """Roll a partition forward or back after an interrupted swap.
+
+    `_SUCCESS` is written between "new files are all in place" and "old files
+    are gone", so it is the commit point: whatever generation it names is the
+    complete one, and any other generation present is either a half-moved new
+    set (crash before the commit) or a superseded old set (crash after it).
+    Both are removed. Returns the number of files dropped.
+    """
+    committed = _committed_generation(store, period)
+    if committed is None:
+        return 0
+    stale = [p for p in _parquet_files(store, paths.period_prefix(period))
+             if _generation(p) != committed]
+    for path in stale:
+        store.fs.delete_file(path)
+    if stale:
+        log.warning(
+            "period=%s: dropped %d file(s) from an interrupted swap, keeping generation %s",
+            period, len(stale), committed or "(legacy)",
+        )
+    return len(stale)
+
+
 def compact_period(
     store: Store,
     settings: Settings,
@@ -97,11 +159,15 @@ def compact_period(
     include_deltas: bool = True,
 ) -> dict:
     """Rewrite one period partition. Returns a small stats dict."""
+    base_prefix = paths.period_prefix(period)
+    # A previous run may have died mid-swap; settle that before reading, so the
+    # dedupe never sees two generations of the same rows.
+    reconcile_period(store, period)
+
     con = duckdb_connect(settings, store)
     con.execute("SET preserve_insertion_order=true;")
 
-    base_prefix = paths.period_prefix(period)
-    has_base = bool(store.ls(base_prefix, recursive=True))
+    has_base = bool(_parquet_files(store, base_prefix))
     delta_prefix = paths.DELTA
     has_delta = include_deltas and bool(store.ls(delta_prefix, recursive=True))
     if not has_base and not has_delta:
@@ -113,10 +179,16 @@ def compact_period(
         *year_range,
     )
 
+    # The generation tag keeps the new files from colliding with the ones they
+    # replace, which is what lets them be moved in before the old ones go. The
+    # random suffix is load-bearing: a bare second-resolution timestamp repeats
+    # when a period is recompacted twice in the same second, and the new file
+    # then lands on the old one's path and is deleted as superseded.
+    generation = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ") + uuid.uuid4().hex[:6]
     staging = f"{paths.COMPACT_STAGING}/period={period}"
     store.delete(staging)
     store.mkdirs(staging)
-    writer = RollingWriter(store, staging, settings)
+    writer = RollingWriter(store, staging, settings, name=f"part-{generation}")
     reader = con.execute(sql).fetch_record_batch(settings.row_group_rows)
     rows = 0
     try:
@@ -137,19 +209,34 @@ def compact_period(
         store.delete(staging)
         return {"period": period, "rows": 0, "files": 0, "skipped": "no rows"}
 
-    # Swap. Object stores give no atomic directory rename, so the window between
-    # delete and move is a real (short) inconsistency. Readers that care should
-    # use the catalog, which is updated last.
-    store.delete(base_prefix)
+    # Swap. Object stores give no atomic directory rename, so a reader can catch
+    # this mid-flight either way; the choice is what they see. Moving the new
+    # generation in first and deleting the old one after means the worst case is
+    # briefly duplicated rows rather than a partition that is empty or missing
+    # half its data, and a crash can never destroy a period the deltas can no
+    # longer rebuild. `_SUCCESS` is written between the two, so it names the
+    # generation to keep if this dies partway; see reconcile_period.
+    # Select what to drop by generation rather than by "everything that was here
+    # before", so a file belonging to the generation being written can never end
+    # up in the delete list however the names collide.
+    superseded = [p for p in _parquet_files(store, base_prefix) if _generation(p) != generation]
     store.mkdirs(base_prefix)
     final = []
     for p in written:
         dest = store.join(base_prefix, p.rsplit("/", 1)[-1])
         store.fs.move(p, dest)
         final.append(dest)
+
+    _write_success(store, period, generation, rows=rows, files=len(final))
+
+    for path in superseded:
+        store.fs.delete_file(path)
     store.delete(staging)
-    log.info("compacted period=%s: %d rows into %d files", period, rows, len(final))
-    return {"period": period, "rows": rows, "files": len(final)}
+    log.info(
+        "compacted period=%s: %d rows into %d files (generation %s, replaced %d)",
+        period, rows, len(final), generation, len(superseded),
+    )
+    return {"period": period, "rows": rows, "files": len(final), "generation": generation}
 
 
 def compact_all(

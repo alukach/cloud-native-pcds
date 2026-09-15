@@ -109,8 +109,8 @@ The output is a [Portolan](https://www.portolan-sdi.org/) catalog: STAC 1.1.0 me
 ├── networks/                 tabular, 22 contributing agencies
 │   └── networks.parquet
 ├── observations/             tabular, partitioned by period
-│   ├── period=1872-1903/part-00000.parquet
-│   └── period=2024/part-00000.parquet
+│   ├── period=1872-1903/part-<generation>-00000.parquet
+│   └── period=2024/        part-<generation>-00000.parquet, _SUCCESS
 │
 ├── _manifest/                files.parquet, summary.json
 ├── _state/                   watermarks*.parquet
@@ -118,6 +118,8 @@ The output is a [Portolan](https://www.portolan-sdi.org/) catalog: STAC 1.1.0 me
 ```
 
 Every collection directory also carries `collection.json`, `README.md` and `AGENTS.md`, generated from the same facts as the STAC, so only the files that differ between collections are listed above.
+
+Compacted partition files carry a generation tag, and `_SUCCESS` names the generation that is current. Object stores have no atomic directory rename, so compaction moves the new generation in alongside the old one, writes `_SUCCESS`, and only then deletes what it replaced. A reader who catches the swap mid-flight sees some rows twice rather than a partition that is empty or half-written, and a run that dies partway is rolled back or forward on the next attempt against whatever `_SUCCESS` names. Neither file is matched by the data globs.
 
 `_state/` is a glob because concurrent backfill shards each write their own `watermarks-<shard>.parquet`, which `load` merges with the later watermark winning. `_staging/` is never published and never linked.
 
@@ -246,7 +248,7 @@ uv run pcds append               # incremental, staged as a delta
 ./scripts/walk.sh
 ```
 
-One layout period per run, 8 shards inside it, compaction after each. Restartable: a compacted partition is a finished one, so re-running resumes at the first period without a `part-*.parquet`.
+One layout period per run, 8 shards inside it, compaction after each. Restartable: re-running resumes at the first period without a `_SUCCESS`. The marker is written as the commit point of the partition swap, so it means compacted *and* complete; a `part-*.parquet` glob would also match a partition an interrupted run left half-written, and skip it on every future pass with nothing to say so.
 
 **Batch by period, never by year range.** `backfill` names its output `s<shard>-<NNNNN>.parquet` and resets the index every run, so two runs that both write into a partition overwrite each other's files rather than adding to them. A run covering 1971-1980 writes its 1971 rows into `period=1970-1971` under the same filenames a previous 1800-1970 run used for its 1970 rows, and the 1970 data is gone with no error and nothing in the log. Taking start and end straight from `layout.json` makes that impossible, which is the whole reason the script exists.
 
