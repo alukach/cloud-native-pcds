@@ -161,7 +161,7 @@ def build_tables(raw: dict[str, Any]) -> dict[str, pa.Table]:
     }
 
 
-def write(store: Store, tables: dict[str, pa.Table], frequencies: list[str]) -> None:
+def write(store: Store, tables: dict[str, pa.Table], frequencies: list[str | None]) -> None:
     """One collection directory per metadata table.
 
     The two tables that carry coordinates are written as GeoParquet (Hilbert
@@ -193,7 +193,8 @@ def write(store: Store, tables: dict[str, pa.Table], frequencies: list[str]) -> 
             with store.fs.open_output_stream(target) as sink:
                 pq.write_table(table, sink, compression="zstd", compression_level=9)
     with store.fs.open_output_stream(store.join(paths.VARIABLES, "frequencies.json")) as sink:
-        sink.write(json.dumps(sorted(frequencies)).encode())
+        # Upstream includes a null for histories whose frequency it does not know.
+        sink.write(json.dumps(sorted(f for f in frequencies if f)).encode())
 
 
 def load(store: Store, name: str) -> pa.Table:
