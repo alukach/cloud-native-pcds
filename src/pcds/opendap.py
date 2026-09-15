@@ -82,58 +82,17 @@ def lister_url(
     kind: str = "raw",
     ext: str = "csv",
     constraints: list[str] | None = None,
-    projection: list[str] | None = None,
 ) -> str:
-    """Build a lister URL. `projection` names columns to return (all if omitted)."""
+    """Build a lister URL. Every column is returned; a mirror wants all of them."""
     if kind not in ("raw", "climo"):
         raise ValueError(f"kind must be raw or climo, got {kind!r}")
     path = (
         f"{data_base.rstrip('/')}/lister/{kind}/"
         f"{quote(network_name, safe='')}/{quote(str(native_id), safe='')}.rsql.{ext}"
     )
-    clauses: list[str] = []
-    if projection:
-        clauses.append(",".join(f"{SEQUENCE}.{c}" for c in projection))
-    clauses.extend(constraints or [])
-    if not clauses:
+    if not constraints:
         return path
-    return path + "?" + "&".join(quote(c, safe=_CE_SAFE) for c in clauses)
-
-
-def agg_url(
-    agg_base: str,
-    *,
-    network_name: str,
-    from_date: str | None = None,
-    to_date: str | None = None,
-    input_vars: str = "",
-    input_freq: str = "",
-    input_polygon: str = "",
-    data_format: str = "csv",
-    climatology: bool = False,
-) -> str:
-    """Bulk zip endpoint (one CSV per station, plus variables.csv, per network).
-
-    Useful for a one-shot backfill of a small network, but it aggregates
-    server-side and is slow for anything wide -- a whole network for a single day
-    took >35s in testing. The per-station lister is the workhorse; this is here
-    for completeness and for spot-checking.
-    """
-    action = (
-        "download-climatology=Climatology" if climatology else "download-timeseries=Timeseries"
-    )
-    params = [
-        f"from-date={quote(from_date or '')}",
-        f"to-date={quote(to_date or '')}",
-        f"network-name={quote(network_name)}",
-        f"input-vars={quote(input_vars)}",
-        f"input-freq={quote(input_freq)}",
-        f"input-polygon={quote(input_polygon)}",
-        "only-with-climatology=",
-        action,
-        f"data-format={data_format}",
-    ]
-    return agg_base + "?" + "&".join(params)
+    return path + "?" + "&".join(quote(c, safe=_CE_SAFE) for c in constraints)
 
 
 # --------------------------------------------------------------------------

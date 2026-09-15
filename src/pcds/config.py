@@ -96,10 +96,6 @@ class Settings:
     def lister_base(self) -> str:
         return f"{self.data_base}/lister"
 
-    @property
-    def agg_base(self) -> str:
-        return f"{self.data_base}/pcds/agg/"
-
     def path(self, *parts: str) -> str:
         base = self.root.rstrip("/")
         return "/".join([base, *[p.strip("/") for p in parts]])

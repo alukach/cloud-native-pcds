@@ -83,7 +83,7 @@ Measured: one hourly station with 13 variables, one year → **797 KiB of CSV in
     &download-timeseries=Timeseries&data-format={csv|nc|ascii|xls}
 ```
 
-Returns `pcds_data.zip` containing `{NETWORK}/{native_id}.csv` plus `{NETWORK}/variables.csv`. It aggregates server-side and is slow (one network for a single day took over 35 s), and it is not restartable. `agg_url()` is implemented for spot checks; the per-station lister is the workhorse.
+Returns `pcds_data.zip` containing `{NETWORK}/{native_id}.csv` plus `{NETWORK}/variables.csv`. It aggregates server-side and is slow (one network for a single day took over 35 s), and it is not restartable. Nothing here builds that URL; the per-station lister is the workhorse.
 
 ---
 
