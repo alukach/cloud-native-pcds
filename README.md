@@ -268,12 +268,48 @@ See [`sql/demo.sql`](sql/demo.sql). The short version:
 
 ```sql
 INSTALL httpfs; LOAD httpfs;
+SET VARIABLE root = 'https://data.source.coop/.../pcds';
+
+CREATE VIEW layout AS SELECT * FROM (SELECT unnest(periods, recursive := true)
+                                     FROM read_json_auto(getvariable('root') || '/layout.json'));
+CREATE MACRO periods_for(lo, hi) AS TABLE
+  SELECT period FROM layout WHERE end_year >= lo AND start_year <= hi;
+
 SELECT o.obs_time, o.value
-FROM read_parquet('https://data.source.coop/.../observations/period=*/*.parquet',
+FROM read_parquet(getvariable('root') || '/observations/period=*/*.parquet',
                   hive_partitioning := true) o
-JOIN read_parquet('.../stations/stations.parquet') s USING (station_id)
-WHERE s.native_id = '1145M29' AND o.variable_id = 542 AND o.period = '2025';
+JOIN read_parquet(getvariable('root') || '/stations/stations.parquet') s USING (station_id)
+WHERE s.native_id = '1145M29' AND o.variable_id = 542
+  AND o.period IN (SELECT period FROM periods_for(2025, 2025))
+  AND o.obs_time >= '2025-01-01' AND o.obs_time < '2026-01-01';
 ```
+
+### `period` is a label, not a year
+
+Read this before writing a time filter. `period` is an opaque partition key:
+recent years stand alone (`period=2025`), sparse history is bucketed
+(`period=1872-1903`). Comparing it to a year is silently wrong rather than an
+error:
+
+| Query | What you get |
+| --- | --- |
+| `WHERE period = '1890'` | **0 rows, no error.** 1890 lives in `period=1872-1903`. |
+| `WHERE period >= '1900'` | **Drops 1900 to 1903.** As strings, `'1872-1903'` sorts below `'1900'`, so the bucket containing those years is excluded. |
+| `WHERE obs_time >= '2024-01-01' AND obs_time < '2025-01-01'` | Correct, but reads **every** partition. |
+
+Resolve years to labels through `layout.json`, as `periods_for()` above does.
+The subquery is pushed into Hive partition pruning, so a range inside one bucket
+still opens exactly one file. `tests/test_query_pruning.py` pins that.
+
+There is no finer fallback: files are sorted `(station_id, variable_id,
+obs_time)`, so `obs_time` is interleaved per station and every row group spans
+nearly the whole period. The partition is the time granularity, which is also
+why partitions are sized down to a 64 MiB floor rather than merged further.
+
+For programmatic access, `_manifest/files.parquet` is more precise still: it
+carries `obs_time_min`/`obs_time_max` and `station_id_min`/`station_id_max` per
+file, so you can select files without touching `period` at all. It needs two
+statements, because `read_parquet` will not take a subquery as its argument.
 
 ---
 

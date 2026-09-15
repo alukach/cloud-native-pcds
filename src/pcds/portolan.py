@@ -704,6 +704,13 @@ It carries no names, no units and no coordinates. Every useful query joins it to
 INSTALL httpfs; LOAD httpfs;
 SET VARIABLE root = '{base}';
 
+-- `period` is an opaque label, not a year. Resolve years through layout.json.
+CREATE OR REPLACE VIEW layout AS
+  SELECT * FROM (SELECT unnest(periods, recursive := true)
+                 FROM read_json_auto(getvariable('root') || '/layout.json'));
+CREATE OR REPLACE MACRO periods_for(lo, hi) AS TABLE
+  SELECT period FROM layout WHERE end_year >= lo AND start_year <= hi;
+
 SELECT s.station_name, v.display_name, v.unit, o.obs_time, o.value
 FROM read_parquet(getvariable('root') || '/observations/period=*/*.parquet',
                   hive_partitioning := true)                        o
@@ -711,15 +718,23 @@ JOIN read_parquet(getvariable('root') || '/stations/stations.parquet')   s USING
 JOIN read_parquet(getvariable('root') || '/variables/variables.parquet') v USING (variable_id)
 WHERE s.native_id = '1145M29' AND s.network_name = 'EC_raw'
   AND v.name = 'air_temperature'
-  AND o.period = '2025'
+  AND o.period IN (SELECT period FROM periods_for(2025, 2025))
+  AND o.obs_time >= '2025-01-01' AND o.obs_time < '2026-01-01'
 ORDER BY o.obs_time;
 ```
 
 ## How to keep a query cheap
 
-1. **Always constrain `period`.** It is the Hive partition key. `layout.json` at
-   the catalog root maps years to periods: recent years stand alone (`period=2025`),
-   sparse early decades are bucketed (`period=1872-1903`).
+1. **Always constrain `period`, and never compare it to a year.** It is the Hive
+   partition key and an opaque label: recent years stand alone (`period=2025`),
+   sparse early decades are bucketed (`period=1872-1903`). `WHERE period = '1890'`
+   returns zero rows without erroring, and `WHERE period >= '1900'` silently drops
+   1900 to 1903, because as strings `'1872-1903'` sorts below `'1900'`. Resolve
+   years through `layout.json`, as `periods_for()` above does.
+   Filtering on `obs_time` alone is correct but reads every partition: DuckDB
+   cannot relate a string partition key to a timestamp, and the sort order leaves
+   `obs_time` interleaved, so row-group statistics do not help either. Pair the
+   two.
 2. **Resolve stations first.** Filter the small `stations` table by geometry,
    network or name, then push the resulting `station_id` list into the
    observation scan. Files are sorted by `station_id`, so this prunes row groups.
@@ -781,6 +796,12 @@ joined on `variable_id`.
 INSTALL httpfs; LOAD httpfs;
 SET VARIABLE root = '{base}';
 
+CREATE OR REPLACE VIEW layout AS
+  SELECT * FROM (SELECT unnest(periods, recursive := true)
+                 FROM read_json_auto(getvariable('root') || '/layout.json'));
+CREATE OR REPLACE MACRO periods_for(lo, hi) AS TABLE
+  SELECT period FROM layout WHERE end_year >= lo AND start_year <= hi;
+
 WITH kootenay AS (
   SELECT station_id, station_name
   FROM read_parquet(getvariable('root') || '/stations/stations.parquet')
@@ -798,15 +819,24 @@ FROM read_parquet(getvariable('root') || '/observations/period=*/*.parquet',
                   hive_partitioning := true) o
 JOIN kootenay  k USING (station_id)
 JOIN temp_vars   USING (variable_id)
-WHERE o.period = '2024'
+WHERE o.period IN (SELECT period FROM periods_for(2024, 2024))
+  AND o.obs_time >= '2024-01-01' AND o.obs_time < '2025-01-01'
 GROUP BY 1, 2
 ORDER BY 1, 2;
 ```
 
+`period` is an opaque partition label rather than a year, so it is resolved
+through `layout.json` above. Comparing it to a year is silently wrong:
+`period = '1890'` returns nothing, and `period >= '1900'` drops 1900 to 1903,
+because as strings `'1872-1903'` sorts below `'1900'`.
+
 ## Layout
 
-- Hive partition key `period`, mapped in `layout.json` at the catalog root.
-- Sorted within each file by `(station_id, variable_id, obs_time)`.
+- Hive partition key `period`, mapped in `layout.json` at the catalog root. A
+  period is a contiguous run of years, so it is a label and not a year.
+- Sorted within each file by `(station_id, variable_id, obs_time)`. That leaves
+  `obs_time` interleaved per station, so its row-group statistics prune almost
+  nothing and the partition is effectively the time granularity.
 - Row groups capped at 150,000 rows; page index and a `station_id` bloom filter
   written so a point lookup skips row groups rather than decoding them.
 - zstd level 9.
@@ -859,13 +889,26 @@ def collection_agents(cid: str, col: dict, cfg: CatalogConfig) -> str:
             "Minimum viable query shape:",
             "",
             "```sql",
+            "-- `period` is a label, not a year: resolve it through layout.json.",
+            "CREATE OR REPLACE VIEW layout AS",
+            "  SELECT * FROM (SELECT unnest(periods, recursive := true)",
+            f"                 FROM read_json_auto('{base}/layout.json'));",
+            "CREATE OR REPLACE MACRO periods_for(lo, hi) AS TABLE",
+            "  SELECT period FROM layout WHERE end_year >= lo AND start_year <= hi;",
+            "",
             f"SELECT * FROM read_parquet('{base}/observations/period=*/*.parquet',",
             "                           hive_partitioning := true)",
-            "WHERE period = '2025' AND station_id = <id> AND variable_id = <id>;",
+            "WHERE period IN (SELECT period FROM periods_for(2025, 2025))",
+            "  AND station_id = <id> AND variable_id = <id>;",
             "```",
             "",
             "Dropping the `period` predicate scans the whole archive. Dropping",
             "`station_id` scans every file in the period.",
+            "",
+            "Never compare `period` to a year. `period = '1890'` returns zero rows",
+            "without erroring, and `period >= '1900'` silently drops 1900 to 1903,",
+            "because as strings `'1872-1903'` sorts below `'1900'`. Filtering on",
+            "`obs_time` alone is correct but prunes nothing.",
             "",
             "`obs_time` is naive local standard time, not UTC.",
         ]

@@ -73,6 +73,14 @@ Every one of these cost real time to find. They are pinned in
   localize silently.
 - `variable_id` is **network-scoped**. Air temperature has a different id in each
   of the 22 networks. Select on `standard_name` + `cell_method`.
+- `period` is an **opaque partition label, not a year**, and comparing it to one
+  fails silently rather than loudly: `period = '1890'` returns zero rows, and
+  `period >= '1900'` drops 1900 to 1903 because `'1872-1903'` sorts below
+  `'1900'` as a string. Resolve years through `layout.json`. Filtering on
+  `obs_time` alone is correct but prunes nothing, and the
+  `(station_id, variable_id, obs_time)` sort leaves `obs_time` interleaved, so
+  row-group statistics do not rescue it: the partition is the time granularity.
+  Every documented snippet is executed by `tests/test_query_pruning.py`.
 - A full-station request with no time constraint can exceed 45s. Always chunk.
 
 ## Constraints
