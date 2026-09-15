@@ -16,6 +16,7 @@ which shard finished first.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 
 import pyarrow as pa
@@ -24,6 +25,8 @@ import pyarrow.parquet as pq
 from . import paths
 from .schema import WATERMARKS
 from .storage import Store
+
+log = logging.getLogger("pcds.state")
 
 PATH = (paths.STATE, "watermarks.parquet")
 PREFIX = "watermarks"
@@ -121,6 +124,20 @@ class Watermarks:
         row["consecutive_failures"] = 0
         row["last_error"] = None
         if max_obs_time is not None:
+            # Upstream timestamps are whatever the station's clock said, and a
+            # station with a bad clock reports observations years ahead. Letting
+            # one into the watermark retires the station silently and forever:
+            # every later append asks for `time > <future> - window`, gets an
+            # empty response, and record_success leaves the watermark alone
+            # because max_obs_time is None. Nothing fails, so `pcds failures`
+            # stays empty and the station simply stops being mirrored.
+            if max_obs_time > now:
+                log.warning(
+                    "station %s (%s/%s): observation at %s is in the future, "
+                    "holding the watermark at %s",
+                    station_id, network_name, native_id, max_obs_time, now,
+                )
+                max_obs_time = now
             current = row["watermark"]
             row["watermark"] = max_obs_time if current is None else max(current, max_obs_time)
 

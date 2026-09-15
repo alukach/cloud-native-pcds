@@ -21,6 +21,21 @@ def test_watermark_only_advances():
     assert w.get(1)["rows_total"] == 7
 
 
+def test_a_future_observation_does_not_retire_the_station():
+    """A station with a bad clock used to park its watermark in the future.
+    Every later append then asked for `time > <future> - window`, got nothing,
+    and left the watermark untouched, so the station stopped being mirrored
+    while still reporting healthy and never appearing in `pcds failures`."""
+    w = Watermarks({})
+    w.record_success(1, "EC_raw", "x", max_obs_time=dt.datetime(2099, 1, 1), rows=5, now=NOW)
+    assert w.watermark(1) == NOW
+
+    # The next real observation must still be able to advance it.
+    later = NOW + dt.timedelta(hours=1)
+    w.record_success(1, "EC_raw", "x", max_obs_time=later, rows=1, now=later)
+    assert w.watermark(1) == later
+
+
 def test_empty_result_does_not_move_the_watermark():
     w = Watermarks({})
     w.record_success(1, "EC_raw", "x", max_obs_time=dt.datetime(2026, 9, 10), rows=5, now=NOW)
