@@ -172,7 +172,11 @@ def backfill(
     start_year: int = typer.Option(..., help="Inclusive"),
     end_year: int = typer.Option(..., help="Inclusive"),
     networks: str = typer.Option("", help="Comma-separated network names; empty = all"),
-    shard: str = typer.Option("0/1", help="i/N -- process stations where station_id %% N == i"),
+    shard: str = typer.Option(
+        "0/1",
+        help="i/N -- which of N parallel runs this is. The default does every "
+             "station; only CI needs to split them.",
+    ),
     limit: int = typer.Option(0, help="Stop after N stations (smoke tests)"),
     chunk_years: int = typer.Option(None),
 ):
