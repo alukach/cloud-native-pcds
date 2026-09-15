@@ -56,7 +56,10 @@ class Settings:
     # Object-storage readers do best with files large enough to amortize the
     # footer fetch but small enough to parallelize: 128-512 MiB.
     target_file_bytes: int = _env_int("PCDS_TARGET_FILE_BYTES", 256 * MIB)
-    min_file_bytes: int = _env_int("PCDS_MIN_FILE_BYTES", 64 * MIB)
+    min_file_bytes: int = _env_int("PCDS_MIN_FILE_BYTES", 128 * MIB)
+    # The other end of the conventional cloud-native Parquet range. Enforced by
+    # RollingWriter, which refuses settings that could cross it.
+    max_file_bytes: int = _env_int("PCDS_MAX_FILE_BYTES", 1024 * MIB)
     # Row group sizing drives how much a range request must pull for a predicate
     # hit. 150,000 rows is ~450 KiB compressed in this schema, and it matches the
     # cap Portolan puts on GeoParquet row groups (PORTO-FMT-009), so the
@@ -95,10 +98,6 @@ class Settings:
     @property
     def lister_base(self) -> str:
         return f"{self.data_base}/lister"
-
-    @property
-    def agg_base(self) -> str:
-        return f"{self.data_base}/pcds/agg/"
 
     def path(self, *parts: str) -> str:
         base = self.root.rstrip("/")

@@ -67,9 +67,26 @@ class RollingWriter:
     way to do it: compressed size is not predictable from row count, and the
     ratio varies by an order of magnitude between a 1920s daily station and a
     modern 15-minute one.
+
+    Every file it emits lands in [min_file_bytes, max_file_bytes]. A roll only
+    happens once the current file has passed the target, so every file except
+    the last is at least that big; the last one is whatever was left over, which
+    is the only way a sub-floor file can be born here. `close` merges such a tail
+    back into its predecessor. The single exception is a period holding less than
+    the floor in total: there is nothing to merge it with, and no writer can fix
+    what the layout asked for. `pcds verify` reports those.
     """
 
     def __init__(self, store: Store, prefix: str, settings: Settings, name: str = "part"):
+        # A merged tail is at most one target plus one floor, so that sum is the
+        # real worst case and the only thing that has to stay under the ceiling.
+        worst = settings.target_file_bytes + settings.min_file_bytes
+        if worst > settings.max_file_bytes:
+            raise ValueError(
+                f"target ({settings.target_file_bytes}) + floor "
+                f"({settings.min_file_bytes}) = {worst} bytes, over the "
+                f"{settings.max_file_bytes} ceiling; lower PCDS_TARGET_FILE_BYTES"
+            )
         self.store = store
         self.prefix = prefix
         self.name = name
@@ -95,17 +112,57 @@ class RollingWriter:
         for batch in table.to_batches(max_chunksize=self.settings.row_group_rows):
             self.writer.write_table(pa.Table.from_batches([batch]), row_group_size=len(batch))
             if self.sink.tell() >= self.settings.target_file_bytes:
-                self.close()
+                self._close_current()
                 self.index += 1
                 self._open()
 
-    def close(self) -> list[str]:
+    def _close_current(self) -> None:
         if self.writer is not None:
             self.writer.close()
             self.writer = None
         if self.sink is not None:
             self.sink.close()
             self.sink = None
+
+    def _size(self, path: str) -> int:
+        return self.store.fs.get_file_info(path).size
+
+    def _merge_tail(self) -> None:
+        """Fold the last file into the one before it, row group by row group.
+
+        Streamed rather than read whole: the two together can be most of a
+        gigabyte compressed and several times that in Arrow. Input to the writer
+        is globally sorted and files are written in order, so every row of the
+        earlier file precedes every row of the later one and concatenating them
+        keeps the sort.
+        """
+        keep, tail = self.paths[-2], self.paths[-1]
+        merged = f"{keep}.merging"
+        sink = self.store.fs.open_output_stream(merged)
+        writer = pq.ParquetWriter(sink, OBSERVATIONS, **self._opts)
+        try:
+            for src in (keep, tail):
+                with self.store.fs.open_input_file(src) as f:
+                    reader = pq.ParquetFile(f)
+                    for i in range(reader.num_row_groups):
+                        # Parquet has no SECOND timestamp, so obs_time round
+                        # trips as timestamp[ms] and the writer rejects it.
+                        writer.write_table(
+                            reader.read_row_group(i).cast(OBSERVATIONS),
+                            row_group_size=self.settings.row_group_rows,
+                        )
+        finally:
+            writer.close()
+            sink.close()
+        self.store.fs.delete_file(keep)
+        self.store.fs.delete_file(tail)
+        self.store.fs.move(merged, keep)
+        self.paths.pop()
+
+    def close(self) -> list[str]:
+        self._close_current()
+        if len(self.paths) > 1 and self._size(self.paths[-1]) < self.settings.min_file_bytes:
+            self._merge_tail()
         return self.paths
 
 

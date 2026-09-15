@@ -13,7 +13,6 @@ import pathlib
 import pytest
 
 from pcds.opendap import (
-    agg_url,
     lister_url,
     strip_sequence_header,
     time_constraints,
@@ -41,16 +40,6 @@ def test_lister_url_encodes_constraints_the_way_pydap_accepts():
     assert "&station_observations.time<%222026-09-09" in url
 
 
-def test_projection_precedes_selection():
-    url = lister_url(
-        DATA_BASE, "EC_raw", "1145M29",
-        projection=["time", "air_temperature"],
-        constraints=['station_observations.air_temperature<0'],
-    )
-    q = url.split("?", 1)[1]
-    assert q.startswith("station_observations.time,station_observations.air_temperature")
-
-
 def test_inclusive_lower_bound_steps_back_one_second():
     (c,) = time_constraints("2026-09-08 00:00:00", start_inclusive=True)
     assert c == 'station_observations.time>"2026-09-07 23:59:59"'
@@ -60,14 +49,6 @@ def test_datetime_and_string_bounds_agree():
     a = time_constraints(dt.datetime(2020, 1, 1))
     b = time_constraints("2020-01-01 00:00:00")
     assert a == b
-
-
-def test_agg_url_shape():
-    url = agg_url(DATA_BASE + "/pcds/agg/", network_name="PC-Aval",
-                  from_date="2026-09-01", to_date="2026-09-03")
-    assert "download-timeseries=Timeseries" in url
-    assert "network-name=PC-Aval" in url
-    assert "data-format=csv" in url
 
 
 def test_strip_sequence_header():

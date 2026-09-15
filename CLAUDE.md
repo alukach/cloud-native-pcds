@@ -45,13 +45,13 @@ Do not relitigate these without a reason; each was argued through once.
 
 | Decision | Why |
 |---|---|
-| Long/tidy observation schema | 22 networks define 358 variables with no common wide schema. Wide is mostly nulls and needs schema evolution per sensor. Sorted long packs to ~3 bytes/row. |
-| Partition by `period`, not year | PCDS spans a handful of manual daily stations in 1872 to ~950 mostly-hourly ones now. Strict yearly gives ~155 partitions from KiB to hundreds of MiB. `pcds layout` merges sparse years to clear a 64 MiB floor. |
+| Long/tidy observation schema | 22 networks define 358 variables with no common wide schema. Wide is mostly nulls and needs schema evolution per sensor. Sorted long packs to ~1.1 bytes/row measured, against the ~3 this row used to claim. |
+| Partition by `period`, not year | PCDS spans a handful of manual daily stations in 1872 to ~950 mostly-hourly ones now. Strict yearly gives ~155 partitions from KiB to hundreds of MiB. `pcds layout` merges sparse years to clear a **128 MiB** floor, the low end of the conventional 128 MiB - 1 GiB range. Ten periods of 129-242 MiB cover 1872-2026. The floor is the only cut rule; a `max_span_years=50` cap used to fire first over the sparse head and emit a 2.5 MiB partition, which is what the floor exists to prevent. Low end deliberately: the partition is the only time-pruning granularity, so every doubling doubles what a one-year query reads. |
 | Per-station lister, not the bulk `agg` zip | `agg` aggregates server-side, is not restartable, and took >35s for one network for one day. The lister parallelizes and resumes. |
-| Daily append, quarterly compaction | Arrival is ~272k obs/day, ~800 KiB packed. You would wait ~330 days to fill one target-sized file, so freshness and file size are separate schedules. Append stages small deltas; compaction packs them. |
-| Plan the layout once, before the walk | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity and nothing repairs it afterwards. Re-planning once data exists moves boundaries under written partitions and orphans them; `pcds layout` warns which ones. Re-plan when the walk is done, and re-backfill the years whose boundaries moved. |
+| Daily append, quarterly compaction | Arrival is ~218k obs/day, ~225 KiB packed. You would wait ~1,166 days to fill one target-sized file, so freshness and file size are separate schedules. Append stages small deltas; compaction packs them. Quarterly is also a floor and not only a sizing choice: a staged delta is not published, so the compaction interval is the real publication lag. |
+| Plan the layout once, before the walk | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity. Re-planning once data exists still moves boundaries under written partitions and orphans them; `pcds layout` warns which ones. But re-backfilling is now the fallback, not the only option: when the floor goes **up**, old periods merge without splitting, every orphan nests whole inside one new period, and `scripts/repartition.py` moves the rows locally with nothing re-fetched. It refuses when a written period straddles two new ones, which does need those years re-fetched. |
 | 30-day trailing re-read | PCDS is explicitly preliminary. Observations get corrected and late data arrives for weeks. Append-only would bake in wrong values. |
-| 150k-row row groups | ~450 KiB compressed, a sensible floor for a range request, and it matches Portolan's GeoParquet cap so one fewer thing to explain. |
+| 150k-row row groups | Matches Portolan's GeoParquet cap so one fewer thing to explain. The "~450 KiB compressed" that justified it assumed 3 bytes/row; measured, it is 1.06-1.4, so a row group is ~160-210 KiB. Smaller than ideal for a range request. Not yet changed, since the cap is the other half of the reason. |
 | Portolan, knowingly non-conformant | Two MUSTs cannot be met by a large time-partitioned non-spatial table. See `DEVIATIONS.md` in built output and `src/pcds/portolan.py::DEVIATIONS`. |
 | Hand-rolled GeoParquet and PNG | 7k points does not justify geopandas; a scatter plot does not justify matplotlib in CI. Both are ~100 lines and tested. |
 
@@ -111,10 +111,21 @@ and 3 across 8 shards. Do not raise these to make a backfill finish sooner.
 
 Measured against the live metadata API in September 2026: 6,977 BC stations,
 9,632 histories, 22 networks, 358 variables, ~947 histories reporting within the
-last 30 days, ~272k observations/day. `pcds plan` recomputes all of it and
-switches from the metadata estimate to measured bytes/row once the catalog
-exists. Re-run it after a season of real data before trusting the cron cadence
-in `.github/workflows/`.
+last 30 days, ~272k observations/day.
+
+Measured against the **written catalog**, which is the set that matters for
+sizing and was guessed at until now: **1.06 bytes/row** over 115.7M rows for
+1872-1997, and **1.36-1.39** for 2020 and 2021. `DEFAULT_BYTES_PER_ROW` was 3.0.
+Separately, `estimated_year_rows` overpredicts row counts by 1.78x for 2020 and
+1.90x for 2021 (and 2.6-15x over the sparse years), because it assumes every
+variable on a history reports at that history's frequency. `ESTIMATE_CALIBRATION`
+divides it back out, calibrated on the modern regime and honest only there.
+Together those two were a ~4x byte overestimate and are why the first layout
+asked for a 64 MiB floor and produced files of 2.5 to 13 MiB.
+
+`pcds plan` recomputes all of it and switches from the metadata estimate to
+measured bytes/row once the catalog exists. Re-run it after a season of real
+data before trusting the cron cadence in `.github/workflows/`.
 
 ## Conventions
 
