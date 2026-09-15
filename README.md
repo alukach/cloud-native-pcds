@@ -16,9 +16,13 @@ Six steps, one CLI command each.
 
 1. **Metadata** (`pcds metadata`, weekly) pulls the five JSON endpoints and writes them as small Parquet tables. Everything downstream joins against these: station ids, which variables exist, who reports what. `stations` and `histories` carry lat/lon and become GeoParquet.
 
-2. **Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`.
+2. **Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`. Sizes come from station metadata, or from measured row counts for the years already written, whichever is available per year. Plan this once, before the backfill: see the warning under [Backfilling the rest of the archive](#backfilling-the-rest-of-the-archive).
 
-3. **Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a shared token bucket capped at 2 req/s. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`. Per-station watermarks in `_state/` make a crashed run resume rather than restart. `append` starts from each watermark *minus 30 days*, because PCDS observations are explicitly preliminary and get revised for weeks after the fact; append-only would silently bake in wrong values.
+3. **Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a token bucket capped at 2 req/s. The bucket is per process, so N parallel shards put N times that on PCIC. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`.
+
+   Both entry points clip their range to each station's own `min_obs_time`/`max_obs_time` first. A window a station has no data for still costs a full request that returns a bare header, and over 1870-2026 that is 88% of them.
+
+   `append` starts from each watermark in `_state/` *minus 30 days*, because PCDS observations are explicitly preliminary and get revised for weeks after the fact; append-only would silently bake in wrong values. Watermarks make `append` resumable. They do not make `backfill` resumable: it walks a fixed year range regardless of what has been fetched, so a crashed shard redoes its whole range. Resume granularity for a long walk is the period, via `scripts/walk.sh`.
 
 4. **Write** (`pack.py`) emits Parquet sorted by `(station_id, variable_id, obs_time)`, with dictionary-encoded ids, delta-packed timestamps, zstd, a page index and 150,000-row row groups. The sort is what makes the statistics selective, so a reader after one station skips nearly every row group. Daily appends do not write into the partitions; they drop a small *delta* into `_staging/delta/`, because at ~800 KiB/day you would wait most of a year to fill one properly sized file.
 
@@ -128,6 +132,8 @@ Every collection directory also carries `collection.json`, `README.md` and `AGEN
 
 Long beats wide here because 22 networks report 358 variable definitions with no common schema. A wide table is mostly nulls and needs schema evolution every time a network adds a sensor. Sorted by `(station_id, variable_id, obs_time)`, the long form packs to roughly **3 bytes per row**.
 
+That 3 is the planning figure, and it is deliberately conservative. The 23M rows of pre-1971 data loaded so far measure **0.98 bytes/row**, but those are rounded daily readings that dictionary-encode almost for free. Modern 15-minute sensor floats carry far more entropy in `value` and will pack worse. Treat the modern end as unmeasured until it is loaded.
+
 ### Partitioning by *period*, not by year
 
 Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 64 MiB floor: sparse history buckets into decades, recent years stand alone.
@@ -220,8 +226,9 @@ uv run pcds metadata             # fetch the station catalog
 uv run pcds layout               # plan period partitions -> layout.json
 uv run pcds plan                 # sizing + cadence report
 
-# Proof of concept: 2020-present.
-uv run pcds backfill --start-year 2020 --end-year 2026 --shard 0/8
+# Proof of concept: 2020-present. Start and end must be period boundaries;
+# `scripts/walk.sh` takes them from layout.json so they always are.
+uv run pcds backfill --start-year 2020 --end-year 2026
 uv run pcds compact              # fold + dedupe + re-pack
 uv run pcds catalog              # per-file stats
 uv run pcds verify               # sort order, duplicate keys, file sizes
@@ -231,18 +238,21 @@ uv run pcds portolan --base-url https://.../pcds --s3-uri s3://.../pcds
 uv run pcds append               # incremental, staged as a delta
 ```
 
-`scripts/smoke.sh` runs the whole loop against a dozen stations in a couple of minutes.
+`scripts/smoke.sh` runs the whole loop against a dozen stations in a couple of minutes. `scripts/walk.sh` drives the full archive backfill, one period at a time.
 
 ### Backfilling the rest of the archive
 
-Walk backwards in 5-year increments, one `workflow_dispatch` at a time, then re-plan the layout so the sparse early decades merge into larger partitions:
-
 ```bash
-for y in 2015 2010 2005 2000 1995 1990 1985 1980 1975 1970; do
-  gh workflow run backfill.yml -f start_year=$y -f end_year=$((y+4))
-done
-uv run pcds layout && uv run pcds compact
+./scripts/walk.sh
 ```
+
+One layout period per run, 8 shards inside it, compaction after each. Restartable: a compacted partition is a finished one, so re-running resumes at the first period without a `part-*.parquet`.
+
+**Batch by period, never by year range.** `backfill` names its output `s<shard>-<NNNNN>.parquet` and resets the index every run, so two runs that both write into a partition overwrite each other's files rather than adding to them. A run covering 1971-1980 writes its 1971 rows into `period=1970-1971` under the same filenames a previous 1800-1970 run used for its 1970 rows, and the 1970 data is gone with no error and nothing in the log. Taking start and end straight from `layout.json` makes that impossible, which is the whole reason the script exists.
+
+Do not re-plan the layout part way through. `pcds layout` is a planning tool for a partitioning that does not exist yet; once data is written, moving a boundary orphans the partition that carried the old label, and compaction will not move rows between periods to repair it. It warns when a new plan would orphan a written partition. Re-plan when the walk is finished, if at all.
+
+If a mid-walk re-plan has already happened, `pcds layout --ignore-catalog` rebuilds the pre-backfill plan from station metadata alone, which is the one that matches partitions written before a catalog existed.
 
 ### Configuration
 
@@ -250,8 +260,8 @@ uv run pcds layout && uv run pcds compact
 | ------------------------------------ | ---------------- | ------------------------------------------------- |
 | `PCDS_ROOT`                          | `./data`         | local path or `s3://bucket/prefix`                |
 | `PCDS_S3_ENDPOINT`                   | none             | Source Cooperative / R2 endpoint                  |
-| `PCDS_CONCURRENCY`                   | `4`              | parallel station fetches                          |
-| `PCDS_MAX_RPS`                       | `2.0`            | shared token bucket against PCIC                  |
+| `PCDS_CONCURRENCY`                   | `4`              | parallel station fetches, per process             |
+| `PCDS_MAX_RPS`                       | `2.0`            | token bucket against PCIC, per process            |
 | `PCDS_TARGET_FILE_BYTES`             | 256 MiB          | roll to a new part file at this size              |
 | `PCDS_MIN_FILE_BYTES`                | 64 MiB           | partition size floor for `pcds layout`            |
 | `PCDS_ROW_GROUP_ROWS`                | 150,000          | ~450 KiB compressed; matches PORTO-FMT-009        |
@@ -333,7 +343,8 @@ statements, because `read_parquet` will not take a subquery as its argument.
 
 - **Climatologies** (`.../lister/climo/...`) are not ingested yet; the lister supports them and they would become a sixth collection.
 - **Two Portolan requirements are knowingly unmet.** See `DEVIATIONS.md` in the built catalog, and the table above.
-- **Partition swap is not atomic.** Compaction stages to `obs/_staging/`, deletes the old partition, then moves. There is a short window where a reader LISTing the prefix sees a partial partition. The catalog is written last, so catalog-driven readers are safe; a generation-suffixed prefix or an Iceberg table would close it properly.
+- **Partition swap is not atomic.** Compaction stages to `obs/_staging/`, deletes the old partition, then moves. There is a short window where a reader LISTing the prefix sees a partial partition. The catalog is written last, so catalog-driven readers are safe; a generation-suffixed prefix or an Iceberg table would close it properly. It is also a durability window, not only a visibility one: a crash after the delete and part way through the moves leaves the staged remainder to be wiped by the next run, and those rows have to be re-fetched.
+- **Nothing re-partitions written data.** Compaction only ever rewrites a period in place, so a layout change after a backfill cannot be applied to what is already on disk. `pcds layout` warns which partitions a new plan would orphan, but acting on it means re-fetching those years. A `pcds repartition` reading across old period directories is the missing piece.
 - **Time zones.** Observations are stored as published, in naive local standard time. `histories.tz_offset` is carried through but not applied.
 - **Non-BC records.** Everything is filtered to `provinces=BC`; PCDS also holds some Alberta data, and PCIC runs a separate Yukon/NWT instance on the same API.
 
