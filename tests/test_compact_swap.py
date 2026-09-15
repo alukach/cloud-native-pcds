@@ -17,7 +17,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from pcds import paths
-from pcds.compact import _generation, _parquet_files, compact_period, reconcile_period
+from pcds.compact import (
+    _generation,
+    _parquet_files,
+    compact_period,
+    mark_compacted,
+    reconcile_period,
+)
 from pcds.config import Settings
 from pcds.pack import write_delta
 from pcds.schema import OBSERVATIONS
@@ -171,6 +177,52 @@ def test_a_crash_during_the_swap_never_empties_the_partition(store_and_settings,
     final = _read_all(store)
     assert final.num_rows == 30
     assert set(final.column("value").to_pylist()) == {9.0}
+
+
+def test_mark_compacted_adopts_a_partition_written_before_markers(store_and_settings):
+    """Every partition compacted before `_SUCCESS` existed looks unfinished to
+    walk.sh, which would re-walk the archive and put the whole request cost back
+    on PCIC. Marking them is the migration."""
+    store, settings = store_and_settings
+    _seed_base(store, settings, _obs(10, value=1.0))
+
+    assert mark_compacted(store, PERIOD) is True
+    assert store.exists(paths.period_success(PERIOD))
+    # Already marked, so a second call is a no-op rather than a rewrite.
+    assert mark_compacted(store, PERIOD) is False
+
+    # The legacy files must survive reconciliation, not be mistaken for debris.
+    assert reconcile_period(store, PERIOD) == 0
+    assert len(_parquet_files(store, paths.period_prefix(PERIOD))) == 1
+
+
+def test_mark_compacted_refuses_a_generation_tagged_partition(store_and_settings):
+    store, settings = store_and_settings
+    _seed_base(store, settings, _obs(10, value=1.0))
+    compact_period(store, settings, PERIOD, (2024, 2024))
+    store.delete(paths.period_success(PERIOD))
+
+    with pytest.raises(ValueError, match="run a compaction"):
+        mark_compacted(store, PERIOD)
+
+
+def test_mark_compacted_refuses_un_compacted_shard_output(store_and_settings):
+    """Backfill shard files are untagged too, so the generation alone cannot
+    tell them from a legacy compacted partition. Marking a period that holds
+    only some shards' output would hide the missing shards permanently. This is
+    the exact state `period=1998` was left in by an interrupted walk."""
+    store, settings = store_and_settings
+    _seed_base(store, settings, _obs(10, value=1.0), name="s005-00000.parquet")
+    _seed_base(store, settings, _obs(10, value=2.0), name="s007-00000.parquet")
+
+    with pytest.raises(ValueError, match="un-compacted shard output"):
+        mark_compacted(store, PERIOD)
+    assert not store.exists(paths.period_success(PERIOD))
+
+
+def test_mark_compacted_ignores_an_empty_partition(store_and_settings):
+    store, _ = store_and_settings
+    assert mark_compacted(store, PERIOD) is False
 
 
 def test_reconcile_is_a_noop_without_a_marker(store_and_settings):

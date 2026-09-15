@@ -248,6 +248,27 @@ uv run pcds append               # incremental, staged as a delta
 ./scripts/walk.sh
 ```
 
+**Migrating a dataset built before `_SUCCESS` existed.** Partitions compacted by
+an earlier version carry no marker, so `walk.sh` would treat the whole archive as
+unfinished and re-fetch it, which is exactly the cost this mirror exists to avoid.
+Mark the periods you know are complete, once:
+
+```bash
+uv run python -c "
+import json, pathlib
+from pcds import paths
+from pcds.compact import mark_compacted
+from pcds.config import Settings
+from pcds.storage import open_store
+store = open_store(Settings())
+for p in json.load(open(pathlib.Path(Settings().root) / paths.LAYOUT_FILE))['periods']:
+    print(p['period'], mark_compacted(store, p['period']))
+"
+```
+
+It refuses any partition that already carries generation-tagged files, since
+those came from a compaction that would have left its own marker.
+
 One layout period per run, 8 shards inside it, compaction after each. Restartable: re-running resumes at the first period without a `_SUCCESS`. The marker is written as the commit point of the partition swap, so it means compacted *and* complete; a `part-*.parquet` glob would also match a partition an interrupted run left half-written, and skip it on every future pass with nothing to say so.
 
 **Batch by period, never by year range.** `backfill` names its output `s<shard>-<NNNNN>.parquet` and resets the index every run, so two runs that both write into a partition overwrite each other's files rather than adding to them. A run covering 1971-1980 writes its 1971 rows into `period=1970-1971` under the same filenames a previous 1800-1970 run used for its 1970 rows, and the 1970 data is gone with no error and nothing in the log. Taking start and end straight from `layout.json` makes that impossible, which is the whole reason the script exists.

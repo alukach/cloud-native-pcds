@@ -6,15 +6,20 @@ unverified, and which mistakes are easy to make here.
 
 ## Status
 
-**A live backfill has run against PCIC, and was still running as this was
-written.** An earlier version of this section said nothing had touched the live
-API; that was wrong by tens of thousands of requests, and every risk judgement
-made from it was made on a false premise. Numbers below are from `logs/` and
-`data/_manifest/summary.json` at 2026-09-15 06:10 local and will have moved on.
+**A live backfill has run against PCIC.** An earlier version of this section
+said nothing had touched the live API; that was wrong by tens of thousands of
+requests, and every risk judgement made from it was made on a false premise.
+Numbers below are from `logs/` and `data/_manifest/summary.json` as of
+2026-09-15, after the walk stopped.
 
 - 35,653 requests to `services.pacificclimate.org`, 35,647 of them `200`.
   115,658,039 rows across 20 files, 1.056 bytes/row, `obs_time` spanning
-  1872-01-01 to 1997-12-31. Periods `1872-1921` through `1998` are on disk.
+  1872-01-01 to 1997-12-31.
+- **The walk stopped partway through 1998 and did not resume.** Periods
+  `1872-1921` through `1997` are compacted (one `part-00000.parquet` each);
+  `period=1998` holds `s005-` and `s007-` only, so 2 of 8 shards ran and
+  nothing was folded. Re-run `scripts/walk.sh` to finish it. Do not mark 1998
+  complete: `compact.mark_compacted` refuses it for exactly this reason.
 - **Zero 5xx in 35,653 requests.** The deterministic-500 gotcha below is
   therefore still unconfirmed in production, and with it every code path that
   hangs off it: `ingest.MAX_ATTEMPTS_500`, the retry branch, `quarantined()`
@@ -32,7 +37,7 @@ made from it was made on a false premise. Numbers below are from `logs/` and
   default rather than an oversight, but it contradicts the Constraints section
   below, which is the part a reader is likely to trust. Decide which one is the
   policy before the next walk.
-- 145 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
+- 149 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
   small catalog on disk and runs a real `rashid check` over it.
 - `ruff check .` is clean. The lint rule set is pinned explicitly in
   `pyproject.toml`; ruff's implicit default widens between releases and took the

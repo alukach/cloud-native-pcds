@@ -115,7 +115,9 @@ def _committed_generation(store: Store, period: str) -> str | None:
         return None
 
 
-def _write_success(store: Store, period: str, generation: str, *, rows: int, files: int) -> None:
+def _write_success(
+    store: Store, period: str, generation: str, *, rows: int | None, files: int
+) -> None:
     payload = {
         "generation": generation,
         "rows": rows,
@@ -124,6 +126,48 @@ def _write_success(store: Store, period: str, generation: str, *, rows: int, fil
     }
     with store.fs.open_output_stream(store.join(paths.period_success(period))) as f:
         f.write(json.dumps(payload, indent=2).encode())
+
+
+def mark_compacted(store: Store, period: str) -> bool:
+    """Write a `_SUCCESS` for a partition compacted before markers existed.
+
+    Those files carry no generation tag, so the marker names the empty
+    generation and `reconcile_period` leaves them alone. Without this, every
+    partition written before this change looks unfinished to `walk.sh`, which
+    would re-walk the whole archive and put the entire request cost back on
+    PCIC. Only run it for periods you have reason to believe are complete.
+
+    Returns False if the partition is empty or already marked.
+    """
+    files = _parquet_files(store, paths.period_prefix(period))
+    if not files or store.exists(paths.period_success(period)):
+        return False
+    generations = {_generation(p) for p in files}
+    if generations != {""}:
+        # Already generation-tagged, so it was written by a compaction that
+        # would have left its own marker. Something else is going on; say so
+        # rather than stamping it complete.
+        raise ValueError(
+            f"period={period} holds generations {sorted(generations)}; "
+            "run a compaction rather than marking it by hand"
+        )
+    # Backfill writes `s<shard>-NNNNN.parquet` and compaction writes
+    # `part-NNNNN.parquet`; both are untagged, so the generation alone cannot
+    # tell them apart. Shard files mean the period was fetched but never
+    # folded, and very possibly only by some of the shards: marking that
+    # complete would hide the missing ones for good.
+    shards = sorted(
+        p.rsplit("/", 1)[-1] for p in files if not p.rsplit("/", 1)[-1].startswith("part-")
+    )
+    if shards:
+        raise ValueError(
+            f"period={period} holds un-compacted shard output ({', '.join(shards)}); "
+            "compact it rather than marking it complete"
+        )
+    # rows is unknown without reading every footer, and nothing reads it back.
+    _write_success(store, period, "", rows=None, files=len(files))
+    log.info("period=%s: marked %d pre-existing file(s) as compacted", period, len(files))
+    return True
 
 
 def reconcile_period(store: Store, period: str) -> int:
