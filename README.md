@@ -329,6 +329,62 @@ statements, because `read_parquet` will not take a subquery as its argument.
 
 ---
 
+## The viewer
+
+`viewer/index.html` is a single page that reads the archive the way a client on
+the internet will: DuckDB-WASM in the browser, querying Parquet over HTTP from a
+bucket on a different origin. There is no build step and no server-side query
+layer, and nothing is preloaded.
+
+```bash
+scripts/serve.py            # bucket on :8788, viewer on :8777
+open http://127.0.0.1:8777/viewer/
+```
+
+`scripts/serve.py` is not a static file server. The archive is destined for
+Source Cooperative, so it answers the S3 REST API instead: ranged `GET` and
+`HEAD`, `ListObjectsV2`, S3-shaped XML errors, `ETag`, and CORS with
+`Access-Control-Expose-Headers: Content-Range`. It serves the page from a
+*different* port than the objects on purpose, because that is the production
+shape and it is the only way the CORS configuration is actually exercised. Point
+the page at the real thing with
+`?base=https://data.source.coop/<account>/<repo>/` and nothing else changes.
+
+What the page demonstrates is partition pruning, with the arithmetic on screen.
+Every query is logged with its SQL, its wall time, the partitions it could reach,
+and the bytes the bucket actually sent, counted by the server rather than
+estimated by the page. Asking one station for 1997 reaches 1 of 20 objects and
+leaves 90% of the archive untouched; asking about 1872 to 1997 reaches all
+twenty, and the log says so.
+
+Four panels share one year window and one variable: a station map coloured by
+each station's mean, a time series, a monthly climatology, and a SQL console over
+the same views (`observations`, `stations`, `histories`, `variables`,
+`networks`, `files`). The variable selector groups by `standard_name` and
+`cell_method` rather than `variable_id`, because ids are network-scoped; see
+above.
+
+### It fetches whole objects, not row groups
+
+DuckDB-WASM buffers each Parquet object in full. Chrome strips the `Range` header
+from the probe its worker makes, so it never learns the object is range-readable
+and falls back to a whole-object `GET`. Partition pruning still does the real
+work, one object instead of twenty, and a partition already pulled answers every
+later question for free.
+
+Native DuckDB against the same bucket goes further, down to row groups. For a
+single station in `period=1995`, measured against `scripts/serve.py`:
+
+| Reader | Bytes for one station-year | Of a 10.7 MiB object |
+| --- | --- | --- |
+| DuckDB (httpfs) | 50,601 | 0.5% |
+| DuckDB-WASM | 10,717,553 | 100% |
+
+So the browser page is the demo, and a notebook is still the better tool for a
+narrow slice of a wide archive.
+
+---
+
 ## Known gaps
 
 - **Climatologies** (`.../lister/climo/...`) are not ingested yet; the lister supports them and they would become a sixth collection.
