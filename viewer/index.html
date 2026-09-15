@@ -369,7 +369,8 @@ async function boot() {
   const yMin = new Date(summary.obs_time_min + 'Z').getUTCFullYear();
   const yMax = new Date(summary.obs_time_max + 'Z').getUTCFullYear();
   $('archive-sub').textContent =
-    `${fmtNum(summary.rows)} observations · ${summary.files} Parquet objects · ${fmtBytes(summary.bytes)} · ${yMin}–${yMax}`;
+    `${fmtNum(summary.rows)} observations · ${summary.files} Parquet object${summary.files === 1 ? '' : 's'}`
+    + ` · ${fmtBytes(summary.bytes)} · ${yMin}–${yMax}`;
   $('stat-total').textContent = fmtBytes(summary.bytes);
   for (const el of [$('y0'), $('y1')]) { el.min = yMin; el.max = yMax; }
 
@@ -678,6 +679,7 @@ async function refreshStations(fit = false) {
     state.station = rows.slice().sort(bestFirst(y0, y1))[0] ?? null;
     state.stationChosen = false;
     await pickDefault(y0, y1);
+    renderStationList();   // the probe's counts outrank the metadata guess
   }
   render();
   writeUrl();
@@ -818,8 +820,13 @@ async function renderSeries(panel) {
   const grain = grainFor(y0, y1);
   const s = state.station;
   const chart = frame(panel, `${s.station_name || s.native_id} — ${state.group.display_name || state.group.standard_name}`,
-    `${esc(s.network_name)} · station #${s.station_id} · rolled up per ${grain}. Only the partitions covering ` +
-    `these years are fetched; the other ${state.byPeriod.size - periods.length} objects in the bucket are never touched.`);
+    `${esc(s.network_name)} · station #${s.station_id} · rolled up per ${grain}. ` +
+    (state.byPeriod.size > periods.length
+      ? `Only the partitions covering these years are read; the other ` +
+        `${state.byPeriod.size - periods.length} object${state.byPeriod.size - periods.length === 1 ? '' : 's'} ` +
+        `in the bucket are never touched.`
+      : `The archive is one object, so the saving here is row-group statistics on ` +
+        `<code>station_id</code>, not partitioning: this read kilobytes of it.`));
 
   const rows = await q(`series · station ${s.station_id}`, `
     SELECT epoch_ms(date_trunc('${grain}', obs_time)) AS t,
