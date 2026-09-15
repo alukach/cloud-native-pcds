@@ -486,10 +486,81 @@ def portolan(
 
 # ------------------------------------------------------------------ verify --
 
+# PORTO-FMT-009. Portolan writes it for GeoParquet; the observation files honour
+# it anyway, so it is the number to assert against.
+ROW_GROUP_CAP = 150_000
+
+
+def _check_partition_files(store) -> list[str]:
+    """Footer-only invariants over every observation partition file.
+
+    Reads metadata, never row data: a few KiB per file regardless of its size.
+    """
+    import pyarrow.parquet as pq
+
+    problems: list[str] = []
+    schemas: dict[tuple, list[str]] = {}
+    oversized: list[str] = []
+    unsorted: list[str] = []
+
+    for info in store.ls(paths.OBSERVATIONS, recursive=True):
+        if not info.path.endswith(".parquet"):
+            continue
+        rel = info.path[len(store.root) :].lstrip("/")
+        with store.fs.open_input_file(info.path) as f:
+            parquet = pq.ParquetFile(f)
+            footer = parquet.metadata
+            arrow_schema = parquet.schema_arrow
+        schemas.setdefault(
+            (tuple(arrow_schema.names), tuple(str(t) for t in arrow_schema.types)), []
+        ).append(rel)
+
+        groups = [footer.row_group(i) for i in range(footer.num_row_groups)]
+        if any(g.num_rows > ROW_GROUP_CAP for g in groups):
+            oversized.append(f"{rel} ({max(g.num_rows for g in groups):,} rows)")
+
+        # Files are sorted by (station_id, ...), so a row group's station_id range
+        # must start at or after the previous one's end. Cheaper than reading rows
+        # and it catches an unsorted write, which is what makes the stats useless.
+        if "station_id" not in footer.schema.names:
+            continue  # the schema check above already reports this file
+        col = list(footer.schema.names).index("station_id")
+        prev_max = None
+        for g in groups:
+            st = g.column(col).statistics
+            if st is None or not st.has_min_max:
+                continue
+            if prev_max is not None and st.min < prev_max:
+                unsorted.append(rel)
+                break
+            prev_max = st.max
+
+    if oversized:
+        problems.append(
+            f"{len(oversized)} file(s) with a row group over {ROW_GROUP_CAP:,} rows "
+            f"(PORTO-FMT-009): {', '.join(oversized[:3])}"
+        )
+    if len(schemas) > 1:
+        shapes = "; ".join(f"{files[0]} -> {list(cols)}" for (cols, _), files in schemas.items())
+        problems.append(f"partition files do not share one schema (PORTO-FMT-021): {shapes}")
+    if unsorted:
+        problems.append(
+            f"{len(unsorted)} file(s) not sorted by station_id: {', '.join(unsorted[:3])}"
+        )
+    return problems
+
 
 @app.command()
 def verify(root: str = typer.Option(None), sample: int = typer.Option(5)):
-    """Sanity checks: sort order, duplicate keys, file sizes, station coverage."""
+    """Sanity checks: row groups, partition schema, sort order, duplicate keys, file sizes.
+
+    The first three are here because rashid cannot reach them. Its data pass
+    iterates a collection's declared assets, and `observations` deliberately has
+    no `data` asset (see DEVIATIONS.md, PORTO-FMT-034), so nothing in the
+    validator ever opens a partition file. Planting a 224,000-row row group and a
+    renamed column in one partition both pass `rashid check` silently. Until
+    rashid#130 closes, this command is the only gate on those MUSTs.
+    """
     _setup(verbose=False)
     from . import catalog as cat
     from .storage import duckdb_connect
@@ -507,6 +578,8 @@ def verify(root: str = typer.Option(None), sample: int = typer.Option(5)):
     if len(small) > 1:
         problems.append(f"{len(small)} files under {SETTINGS.min_file_bytes // 4 // 1024**2} MiB "
                         f"(run `pcds compact`)")
+
+    problems += _check_partition_files(store)
 
     con = duckdb_connect(SETTINGS, store)
     base = store.uri if store.uri.startswith("s3://") else store.root
