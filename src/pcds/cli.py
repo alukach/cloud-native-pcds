@@ -456,6 +456,33 @@ def compact(
         removed = clear_deltas(store)
         log.info("removed %d delta files", removed)
 
+    # Compaction is the only step that *deletes* files. A manifest that is
+    # merely behind is incomplete, which costs a reader some new data; one that
+    # survives a compaction points at objects that are gone, which costs them a
+    # 404. Rebuild it here rather than leaving the ordering to whoever called
+    # us: `build` reads every footer on disk, so a --period run still produces
+    # a whole and correct manifest.
+    #
+    # Only refresh one that already exists. Creating the first manifest is
+    # `pcds catalog`'s job, and doing it here would silently switch
+    # `pcds layout` onto its measured branch as a side effect of compacting.
+    if store.exists(paths.MANIFEST_FILE):
+        from . import catalog as cat
+
+        try:
+            summary = cat.write(store, cat.build(store))
+        except Exception as exc:  # noqa: BLE001
+            # `build` reads every footer in the tree, so one unreadable file
+            # anywhere fails it, including a partition this run never touched
+            # (a crashed writer leaves a parquet with no footer). The
+            # compaction itself is already durable, and the manifest is
+            # derived, so warn rather than take the whole run down with it.
+            log.warning("manifest not refreshed (%s); run `pcds catalog`", exc)
+        else:
+            log.info(
+                "refreshed manifest: %d files, %s rows", summary["files"], f"{summary['rows']:,}"
+            )
+
 
 # ----------------------------------------------------------------- catalog --
 
