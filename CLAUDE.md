@@ -49,6 +49,7 @@ Do not relitigate these without a reason; each was argued through once.
 | Partition by `period`, not year | PCDS spans a handful of manual daily stations in 1872 to ~950 mostly-hourly ones now. Strict yearly gives ~155 partitions from KiB to hundreds of MiB. `pcds layout` merges sparse years to clear a 64 MiB floor. |
 | Per-station lister, not the bulk `agg` zip | `agg` aggregates server-side, is not restartable, and took >35s for one network for one day. The lister parallelizes and resumes. |
 | Daily append, quarterly compaction | Arrival is ~272k obs/day, ~800 KiB packed. You would wait ~330 days to fill one target-sized file, so freshness and file size are separate schedules. Append stages small deltas; compaction packs them. |
+| Plan the layout once, before the walk | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity and nothing repairs it afterwards. Re-planning once data exists moves boundaries under written partitions and orphans them; `pcds layout` warns which ones. Re-plan when the walk is done, and re-backfill the years whose boundaries moved. |
 | 30-day trailing re-read | PCDS is explicitly preliminary. Observations get corrected and late data arrives for weeks. Append-only would bake in wrong values. |
 | 150k-row row groups | ~450 KiB compressed, a sensible floor for a range request, and it matches Portolan's GeoParquet cap so one fewer thing to explain. |
 | Portolan, knowingly non-conformant | Two MUSTs cannot be met by a large time-partitioned non-spatial table. See `DEVIATIONS.md` in built output and `src/pcds/portolan.py::DEVIATIONS`. |
@@ -118,6 +119,15 @@ in `.github/workflows/`.
 ## Conventions
 
 - Prose in docs and comments: no em-dashes.
+- **`README.md` ships with the change that makes it wrong.** It is the only
+  document a reader outside this repo sees, and its commands get copied and run
+  without checking whether they still hold. It taught a 5-year-range backfill
+  loop that the per-run writer names make destructive, and described `backfill`
+  as resuming from watermarks it has never read. Someone followed it. A
+  stale README is not untidy, it is a recipe that loses data. When behaviour,
+  a default, a flag or a measured number changes, fix the README in the same
+  commit, and check the claims either side of the line you are editing while
+  you are there.
 - Comments explain *why*, not *what*. The modules are written to be read in
   order: `opendap` → `ingest` → `pack` → `compact` → `portolan`.
 - Paths live in `src/pcds/paths.py`. Do not hardcode prefixes anywhere else.
