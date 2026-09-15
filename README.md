@@ -2,11 +2,33 @@
 
 A cloud-optimized Parquet mirror of PCIC's **Provincial Climate Data Set** (BC weather and climate observations from 1872 to now), built to demonstrate what partitioning, sorting and encoding actually buy you when the data lives in object storage.
 
-The upstream source is an OPeNDAP (Pydap) service that serves one wide CSV per station. Useful, but you cannot ask it "monthly mean temperature for every station in the Kootenays" without pulling every station in full. The Parquet build answers that in a couple of range requests.
-
 - **Source**: [Meteorological Data Portal (PCDS)](https://services.pacificclimate.org/met-data-portal-pcds/app/) · [docs](https://services.pacificclimate.org/portal/docs/mdp/root.html)
 - **Destination**: Source Cooperative (any S3-compatible endpoint works)
 - **Schedule**: GitHub Actions, daily append and quarterly compaction
+
+---
+
+## How it works
+
+The upstream source is an OPeNDAP (Pydap) service that serves one wide CSV per station. Useful, but you cannot ask it "monthly mean temperature for every station in the Kootenays" without pulling every station in full. The Parquet build answers that in a couple of range requests.
+
+Six steps, one CLI command each.
+
+**1. Metadata** (`pcds metadata`, weekly) pulls the five JSON endpoints and writes them as small Parquet tables. Everything downstream joins against these: station ids, which variables exist, who reports what. `stations` and `histories` carry lat/lon and become GeoParquet.
+
+**2. Layout** (`pcds layout`) decides how to slice observations into files. Not by year: 1872 is a handful of manual daily stations and 2024 is ~950 hourly ones, so yearly slices would range from KiB to hundreds of MiB. Instead it groups years into *periods* that each clear a 64 MiB floor, and writes the year to period map to `layout.json`.
+
+**3. Fetch** (`pcds backfill` / `pcds append`) loops over stations, one request per station per time chunk, behind a shared token bucket capped at 2 req/s. The response is wide, one column per variable, so `opendap.py` parses it and melts it to the long form `(station_id, variable_id, obs_time, value)`. Per-station watermarks in `_state/` make a crashed run resume rather than restart. `append` starts from each watermark *minus 30 days*, because PCDS observations are explicitly preliminary and get revised for weeks after the fact; append-only would silently bake in wrong values.
+
+**4. Write** (`pack.py`) emits Parquet sorted by `(station_id, variable_id, obs_time)`, with dictionary-encoded ids, delta-packed timestamps, zstd, a page index and 150,000-row row groups. The sort is what makes the statistics selective, so a reader after one station skips nearly every row group. Daily appends do not write into the partitions; they drop a small *delta* into `_staging/delta/`, because at ~800 KiB/day you would wait most of a year to fill one properly sized file.
+
+**5. Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
+
+**6. Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order, duplicate keys and file sizes. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
+
+The result is five published collections (`observations`, `stations`, `histories`, `variables`, `networks`) plus three underscore-prefixed directories that are pipeline machinery rather than data: `_manifest/`, `_state/` and `_staging/`. Paths are defined in `src/pcds/paths.py` and nowhere else.
+
+The modules are written to be read in order: `opendap` → `ingest` → `pack` → `compact` → `portolan`.
 
 ---
 
@@ -63,7 +85,7 @@ Returns `pcds_data.zip` containing `{NETWORK}/{native_id}.csv` plus `{NETWORK}/v
 
 ## Dataset layout
 
-The output is a [Portolan](https://www.portolan-sdi.org/) catalog: STAC 1.1.0 metadata over cloud-native files, no server. Collections sit one level below the root; pipeline machinery lives under underscore-prefixed directories so a validator walking `child` links never trips over it.
+The output is a [Portolan](https://www.portolan-sdi.org/) catalog: STAC 1.1.0 metadata over cloud-native files, no server. The underscore prefix on the machinery directories is what keeps a validator walking `child` links from tripping over them.
 
 ```
 {root}/
@@ -93,7 +115,7 @@ The output is a [Portolan](https://www.portolan-sdi.org/) catalog: STAC 1.1.0 me
 
 Every collection directory also carries `collection.json`, `README.md` and `AGENTS.md`, generated from the same facts as the STAC, so only the files that differ between collections are listed above.
 
-The three underscore-prefixed directories are pipeline machinery rather than published data. `_manifest/` holds per-file row counts, byte sizes and station/time ranges so a reader can choose files without a LIST against the bucket. `_state/` holds per-station ingest watermarks; concurrent backfill shards each write their own `watermarks-<shard>.parquet`, which is why it is a glob. `_staging/` holds delta and compaction scratch and is never published or linked.
+`_state/` is a glob because concurrent backfill shards each write their own `watermarks-<shard>.parquet`, which `load` merges with the later watermark winning. `_staging/` is never published and never linked.
 
 ### Observation schema: long, not wide
 
@@ -108,9 +130,7 @@ Long beats wide here because 22 networks report 358 variable definitions with no
 
 ### Partitioning by *period*, not by year
 
-PCDS is wildly non-uniform in time: 1872–1950 is a handful of manual daily stations, 2010–present is ~950 mostly-hourly automatic ones. Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB. Small files are the fastest way to make a "cloud-optimized" dataset slow.
-
-So the partition key is a **period**: a contiguous run of years chosen so every partition clears a 64 MiB floor. `pcds layout` computes it and writes `layout.json`; sparse history buckets into decades, recent years stand alone.
+Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 64 MiB floor: sparse history buckets into decades, recent years stand alone.
 
 ### Why the reads are cheap
 
@@ -184,13 +204,9 @@ uploaded yet, and quietly downgrades every byte-level check to an info.
   compact  30 15 1 */3 *   quarterly; folds ~71 MiB of deltas into the period
 ```
 
-The important result: **appending and packing are different problems.** At ~800 KiB/day you would wait most of a year to accumulate one target-sized file, which is unacceptable for freshness. So the append runs daily and writes a small *delta* file, and compaction folds deltas into the period partition on a schedule chosen purely for file size. A full year of arrivals lands at ~284 MiB, which is why yearly partitions are the right grain for the modern end of the record.
+A full year of arrivals lands at ~284 MiB, which is why yearly partitions are the right grain for the modern end of the record.
 
 Re-run `pcds plan` after a season of real data; it switches from the metadata estimate to measured bytes/row from the catalog and will tell you if the cron should move.
-
-### Revisions are not optional
-
-PCDS is explicitly preliminary: observations get corrected and late data arrives for weeks. Append-only would silently bake in wrong values. Every incremental run re-reads a trailing **30-day revision window** from each station's watermark, and compaction resolves duplicates last-write-wins on `(station_id, variable_id, obs_time)` using the delta's `ingested_at`.
 
 ---
 
