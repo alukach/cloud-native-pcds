@@ -561,6 +561,28 @@ def _check_partition_files(store) -> list[str]:
 
 
 @app.command()
+def failures(root: str = typer.Option(None), limit: int = typer.Option(40)):
+    """Stations that failed their last attempt, worst first.
+
+    Every run already records these in watermarks.parquet; this just reads them
+    back, so a permanently broken station is visible without writing a query.
+    """
+    _setup(verbose=False)
+    from .state import Watermarks
+
+    store = _store(root)
+    rows = [r for r in Watermarks.load(store).rows.values() if r["consecutive_failures"]]
+    rows.sort(key=lambda r: -r["consecutive_failures"])
+    for r in rows[:limit]:
+        flag = " QUARANTINED" if r["consecutive_failures"] >= 10 else ""
+        typer.echo(
+            f"{r['consecutive_failures']:4d}x {r['network_name']}/{r['native_id']}"
+            f"{flag}  {r['last_error']}"
+        )
+    typer.echo(f"{len(rows)} stations failing")
+
+
+@app.command()
 def verify(root: str = typer.Option(None), sample: int = typer.Option(5)):
     """Sanity checks: row groups, partition schema, sort order, duplicate keys, file sizes.
 

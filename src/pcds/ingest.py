@@ -70,6 +70,12 @@ class RateLimiter:
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
+# A lister 500 is reproducible, not transient: some stations fail every request,
+# the .dds schema descriptor included, so no amount of waiting fixes them. One
+# retry covers a genuine blip; more just hammers PCIC and stretches the run.
+# The station lands in watermarks.last_error either way.
+MAX_ATTEMPTS_500 = 2
+
 
 def _get_with_retry(
     client: httpx.Client, url: str, settings: Settings, limiter: RateLimiter
@@ -86,12 +92,15 @@ def _get_with_retry(
             r.raise_for_status()
             return r.content
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in RETRY_STATUS:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if status is not None and status not in RETRY_STATUS:
                 raise
             last = exc
-            backoff = min(60.0, 2.0**attempt) * (0.5 + random.random())
-            log.warning("retry %d/%d after %s: %s", attempt + 1, settings.max_retries, url, exc)
-            time.sleep(backoff)
+            limit = MAX_ATTEMPTS_500 if status == 500 else settings.max_retries
+            log.warning("attempt %d/%d failed for %s: %s", attempt + 1, limit, url, exc)
+            if attempt + 1 >= limit:
+                break
+            time.sleep(min(60.0, 2.0**attempt) * (0.5 + random.random()))
     raise RuntimeError(f"exhausted retries for {url}") from last
 
 
