@@ -37,8 +37,7 @@ def label(start: int, end: int) -> str:
 def plan_periods(
     year_bytes: dict[int, int],
     *,
-    min_file_bytes: int = 64 * MIB,
-    max_span_years: int = 50,
+    min_file_bytes: int = 128 * MIB,
 ) -> list[Period]:
     """Greedily merge consecutive years until each bucket clears the floor.
 
@@ -46,6 +45,12 @@ def plan_periods(
     needs to be right to within a factor of two. A trailing bucket that cannot
     reach the floor is merged backwards into its predecessor so the dataset never
     ends on a stub.
+
+    The floor is the only cut rule. An earlier `max_span_years` cap also cut a
+    bucket once it grew too wide, which is the one way a bucket could be emitted
+    *below* the floor: PCDS is sparse enough before 1998 that clearing the floor
+    there takes more than a century, so the cap fired first and left a 2.5 MiB
+    partition the floor existed to prevent.
     """
     if not year_bytes:
         return []
@@ -58,7 +63,7 @@ def plan_periods(
         # A gap in coverage does not break the bucket -- empty years cost nothing
         # and keeping periods contiguous makes `period_for` total.
         acc += year_bytes.get(year, 0)
-        if acc >= min_file_bytes or (year - start + 1) >= max_span_years:
+        if acc >= min_file_bytes:
             periods.append(Period(label(start, year), start, year))
             start = year + 1
             acc = 0

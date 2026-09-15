@@ -69,10 +69,16 @@ def test_hourly_freshness_moves_append_not_compaction():
 # partition because it cannot clear the size floor. Compaction never moves rows
 # between periods, so such a layout cannot be repaired without re-fetching.
 
+# ~10k variable slots reporting hourly is roughly the modern PCDS network, and
+# lands each estimated year near the 64 MiB the measured 2020 and 2021 came to.
+# The old fixture carried 3 slots, a thousandth of that, so no bucket here ever
+# reached the floor: the plan only split because `max_span_years` cut it every
+# 50 years. With the cap gone the fixture has to be the size it claims to be,
+# or this whole section tests nothing.
 SPAN = [
     {
         "freq": "hourly",
-        "variable_ids": [1, 2, 3],
+        "variable_ids": list(range(10_000)),
         "min_obs_time": dt.datetime(1900, 1, 1),
         "max_obs_time": dt.datetime(2026, 1, 1),
     }

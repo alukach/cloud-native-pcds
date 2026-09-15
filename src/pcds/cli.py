@@ -168,8 +168,10 @@ def layout(
     if orphaned:
         log.warning(
             "%d written partition(s) are not in the new plan: %s. Compaction "
-            "cannot re-partition them; re-backfill those years or keep the "
-            "previous layout.",
+            "cannot re-partition them. Run `python scripts/repartition.py` to "
+            "move their rows locally; it does that without re-fetching when "
+            "each one nests inside a single new period, and tells you which "
+            "years need a re-backfill when one straddles a boundary.",
             len(orphaned),
             ", ".join(orphaned),
         )
@@ -666,8 +668,13 @@ def verify(root: str = typer.Option(None), sample: int = typer.Option(5)):
         if r["file_bytes"] < SETTINGS.min_file_bytes // 4
     ]
     if len(small) > 1:
+        # Compaction packs a period but cannot grow one: it never moves a row
+        # across a boundary, so a period holding less than the floor stays under
+        # it however often you compact. That one is `pcds layout` to fix, and
+        # then `scripts/repartition.py` to apply without re-fetching.
         problems.append(f"{len(small)} files under {SETTINGS.min_file_bytes // 4 // 1024**2} MiB "
-                        f"(run `pcds compact`)")
+                        f"(run `pcds compact`; if they are already compacted, "
+                        f"the period is too narrow and needs `pcds layout`)")
 
     problems += _check_partition_files(store)
 

@@ -36,7 +36,22 @@ OBS_PER_DAY = {
     None: 24,
 }
 
-DEFAULT_BYTES_PER_ROW = 3.0  # long schema, sorted, zstd-9: typically 2-4
+# Measured over the written catalog in September 2026, not guessed: 1.06 B/row
+# across 115.7M archive rows (1872-1997) and 1.36-1.39 B/row over 2020 and 2021.
+# The modern figure is the one that matters here, because the years this default
+# is applied to are the unwritten dense ones. It was 3.0, which overstated every
+# partition by ~2.2x and is half of why a 64 MiB plan produced 2.5-13 MiB files.
+DEFAULT_BYTES_PER_ROW = 1.4
+
+# The other half. `estimated_year_rows` assumes every variable on a history
+# reports at that history's frequency for every day it spans; most do not, so it
+# overpredicts. Against the only years with both an estimate and a measurement it
+# runs 1.78x high for 2020 and 1.90x for 2021, so the estimate is scaled by the
+# reciprocal of their mean. Calibrated on the modern regime and correct only
+# there -- it runs 2.6-15x high over 1872-1997, where the bias varies with how
+# sparse the network was, and those years are measured now anyway. Re-measure
+# this against a full year of real data before trusting a fresh plan.
+ESTIMATE_CALIBRATION = 1 / 1.84
 
 
 def estimated_year_rows(
@@ -60,7 +75,7 @@ def estimated_year_rows(
             hi_y = min(hi, dt.datetime(y + 1, 1, 1))
             days = max((hi_y - lo_y).days, 0)
             year_rows[y] = year_rows.get(y, 0) + int(per_day * days)
-    return year_rows
+    return {y: int(n * ESTIMATE_CALIBRATION) for y, n in year_rows.items()}
 
 
 def year_bytes_for_plan(
@@ -132,6 +147,7 @@ class Cadence:
     obs_per_day: float
     bytes_per_row: float
     bytes_per_day: float
+    min_file_bytes: int
     days_to_min_file: float
     days_to_target_file: float
     append_cron: str
@@ -152,7 +168,7 @@ def cadence(
     obs_per_day: float,
     bytes_per_row: float,
     *,
-    min_file_bytes: int = 64 * MIB,
+    min_file_bytes: int = 128 * MIB,
     target_file_bytes: int = 256 * MIB,
     freshness_hours: int = 24,
 ) -> Cadence:
@@ -173,25 +189,36 @@ def cadence(
         f"({obs_per_day * freshness_hours / 24:,.0f} rows)"
     )
 
-    # Compaction is about file size. Pick the coarsest cadence that still clears
-    # the floor, so the hot partition is rewritten as rarely as possible.
+    # Compaction is mostly about file size: pick the coarsest cadence that still
+    # clears the floor, so the hot partition is rewritten as rarely as possible.
+    #
+    # Quarterly is the floor on that, though, and it is not a size argument. A
+    # staged delta lives under `_staging/`, which is pipeline machinery and not
+    # part of the published dataset, so a row is invisible to readers until the
+    # compaction that folds it. The interval is therefore the real publication
+    # lag, whatever the daily append does. Once the partition floor went to
+    # 128 MiB, a period took 583 days of arrivals to fill and the size rule on
+    # its own said to fold annually: correct about bytes, and a year of
+    # invisible observations.
     if to_min <= 7:
         compact_cron, compact_desc, span = "30 15 * * 0", "weekly (Sundays)", 7
     elif to_min <= 31:
         compact_cron, compact_desc, span = "30 15 1 * *", "monthly (1st)", 30.4
-    elif to_min <= 95:
-        compact_cron, compact_desc, span = "30 15 1 */3 *", "quarterly", 91
     else:
-        compact_cron, compact_desc, span = "30 15 1 1 *", "annually (Jan 1)", 365
+        compact_cron, compact_desc, span = "30 15 1 */3 *", "quarterly", 91
+    years_to_target = to_target / 365
     compact_note = (
         f"{compact_desc}; folds ~{_fmt_bytes(bpd * span)} of deltas into the "
-        f"current period. A full year accumulates ~{_fmt_bytes(bpd * 365)}, so "
-        f"yearly partitions land near the {_fmt_bytes(target_file_bytes)} target."
+        f"current period. A full year accumulates ~{_fmt_bytes(bpd * 365)}, so a "
+        f"period needs ~{years_to_target:.1f} years to reach the "
+        f"{_fmt_bytes(target_file_bytes)} target -- `pcds layout` is what merges "
+        f"years to get there, compaction only packs within one period."
     )
     return Cadence(
         obs_per_day=obs_per_day,
         bytes_per_row=bytes_per_row,
         bytes_per_day=bpd,
+        min_file_bytes=min_file_bytes,
         days_to_min_file=to_min,
         days_to_target_file=to_target,
         append_cron=append_cron,
@@ -214,7 +241,7 @@ def report(rate: ArrivalRate, cad: Cadence, *, target_file_bytes: int) -> str:
         f"  bytes / day                  : {_fmt_bytes(cad.bytes_per_day)}",
         f"  bytes / year                 : {_fmt_bytes(cad.bytes_per_day * 365)}",
         "",
-        f"  days to 64 MiB               : {cad.days_to_min_file:,.0f}",
+        f"  days to {_fmt_bytes(cad.min_file_bytes):>9}            : {cad.days_to_min_file:,.0f}",
         f"  days to {_fmt_bytes(target_file_bytes):>9}            : {cad.days_to_target_file:,.0f}",
         "",
         "Recommended schedule",
