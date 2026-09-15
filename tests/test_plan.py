@@ -98,6 +98,15 @@ def test_partial_backfill_does_not_collapse_the_plan():
     assert len(plan_periods(written_only, min_file_bytes=64 * MIB)) == 1
 
 
+def test_no_measured_rows_is_the_pure_estimate():
+    """What `pcds layout --ignore-catalog` relies on: passing no measured rows
+    reproduces the plan you would get before any data was written."""
+    est = estimated_year_rows(SPAN, 1870, 2027)
+    assert year_bytes_for_plan(SPAN, 1870, 2027) == {
+        y: int(n * DEFAULT_BYTES_PER_ROW) for y, n in est.items()
+    }
+
+
 def test_measured_years_use_the_measured_rate_and_the_rest_do_not():
     yb = year_bytes_for_plan(
         SPAN, 1870, 2027, measured_rows={1950: 1_000_000}, measured_bytes_per_row=0.5

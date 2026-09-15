@@ -108,6 +108,13 @@ def layout(
     root: str = typer.Option(None),
     start_year: int = typer.Option(1870),
     end_year: int = typer.Option(None, help="Defaults to next calendar year"),
+    ignore_catalog: bool = typer.Option(
+        False,
+        "--ignore-catalog",
+        help="Plan from station metadata alone, ignoring measured row counts. "
+        "Rebuilds the pre-backfill plan, which is the one that matches "
+        "partitions written before a catalog existed.",
+    ),
 ):
     """(Re)plan the period partitioning so every partition clears the size floor."""
     _setup()
@@ -120,7 +127,9 @@ def layout(
     measured_rows: dict[int, int] | None = None
     bytes_per_row: float | None = None
 
-    if store.exists(paths.MANIFEST_FILE):
+    if ignore_catalog:
+        log.info("--ignore-catalog: planning from station metadata only")
+    elif store.exists(paths.MANIFEST_FILE):
         # Rows actually written, per year. These override the estimate for the
         # years they cover; `year_bytes_for_plan` keeps the rest of the range.
         from .storage import duckdb_connect
