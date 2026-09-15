@@ -84,6 +84,13 @@ Every one of these cost real time to find. They are pinned in
   `(station_id, variable_id, obs_time)` sort leaves `obs_time` interleaved, so
   row-group statistics do not rescue it: the partition is the time granularity.
   Every documented snippet is executed by `tests/test_query_pruning.py`.
+- Some stations **500 on every lister request**, deterministically and in about
+  0.1s. `FLNRO-FERN/Endako` is one: it fails with no query string at all and
+  fails on `.rsql.dds`, the schema descriptor, so it breaks before any data is
+  serialized and no request shape avoids it. A bogus station id returns a clean
+  404 instead, and its neighbours in the same network return 200. Treat a 500 as
+  a broken station, not a busy server: `ingest.MAX_ATTEMPTS_500` allows one
+  retry, and `pcds failures` lists what is stuck.
 - A full-station request with no time constraint can exceed 45s. Always chunk.
 - A window a station has no data for still costs a full request: the response
   is the sequence name and a header row, nothing else. Selecting stations on
