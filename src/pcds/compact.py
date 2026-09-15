@@ -130,7 +130,7 @@ def compact_period(
             rows += batch.num_rows
             writer.write(pa.Table.from_batches([batch]).cast(OBSERVATIONS))
     finally:
-        paths = writer.close()
+        written = writer.close()
     con.close()
 
     if rows == 0:
@@ -143,7 +143,7 @@ def compact_period(
     store.delete(base_prefix)
     store.mkdirs(base_prefix)
     final = []
-    for p in paths:
+    for p in written:
         dest = store.join(base_prefix, p.rsplit("/", 1)[-1])
         store.fs.move(p, dest)
         final.append(dest)
