@@ -1,0 +1,57 @@
+# Publish viewer/ to GitHub Pages.
+#
+# There is no build step and that is deliberate: the viewer is one HTML file
+# that pulls its three libraries from a CDN and reads the archive straight from
+# Source Cooperative, so what ships is what is in the repository. Adding a
+# bundler here would buy nothing and hide the thing worth seeing.
+#
+# The page picks its bucket from the hostname it is served on, so the deployed
+# build reads https://data.source.coop/alukach/pcds/ while a local checkout
+# reads scripts/serve.py on :8788. Nothing is templated at deploy time.
+#
+# One-time setup: Settings -> Pages -> Source must be "GitHub Actions". Without
+# it the deploy step fails with a 404 on the Pages API.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "viewer/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; the newer commit is the one worth having.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A viewer that cannot reach its data is not worth deploying, and a typo in
+      # the base URL is invisible until someone opens the page. This is the one
+      # network call in the workflow.
+      - name: Check the published archive is readable
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 \
+            https://data.source.coop/alukach/pcds/_manifest/summary.json \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["files"], "objects,", d["rows"], "rows")'
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: viewer
+      - id: deployment
+        uses: actions/deploy-pages@v4

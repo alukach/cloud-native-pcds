@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="en" data-palette="#3987e5,#d95926,#199e70,#c98500">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PCDS Explorer</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:          #121211;
+    --surface-1:   #1a1a19;
+    --surface-2:   #232321;
+    --border:      #34342f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8b8a80;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --good:     #0ca30c;
+    --warning:  #fab219;
+    --radius: 6px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text-primary);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+  }
+
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface-1);
+  }
+  header h1 { margin: 0; font-size: 14px; letter-spacing: .02em; font-weight: 600; }
+  header .sub { color: var(--text-muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  #status { font-size: 12px; color: var(--text-secondary); font-family: var(--mono); }
+  #status.busy::before { content: "◍ "; color: var(--warning); }
+  #status.ready::before { content: "● "; color: var(--good); }
+  #status.error { color: #e66767; }
+
+  main { display: grid; grid-template-columns: 290px 1fr; min-height: 0; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } #map { height: 260px; } }
+
+  aside {
+    border-right: 1px solid var(--border); background: var(--surface-1);
+    overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+  select, input, textarea, button {
+    font: inherit; color: var(--text-primary); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; width: 100%;
+  }
+  textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--series-1); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row > * { min-width: 0; }
+  .hint { font-size: 11px; color: var(--text-muted); }
+
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; }
+  .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+  .stat .v { font-size: 16px; font-variant-numeric: tabular-nums; }
+
+  #results { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto;
+             border: 1px solid var(--border); border-radius: var(--radius); }
+  #results li { padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--border); }
+  #results li:last-child { border-bottom: 0; }
+  #results li:hover { background: var(--surface-2); }
+  #results .nm { display: block; }
+  #results .meta { color: var(--text-muted); font-size: 11px; }
+
+  section.panels { display: grid; grid-template-rows: minmax(160px, 42%) auto minmax(170px, 1fr) auto; min-height: 0; }
+  #map { min-height: 0; background: var(--surface-2); }
+  .maplibregl-popup-content {
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: var(--radius); font: 12px/1.4 system-ui, sans-serif; padding: 8px 10px;
+  }
+  .maplibregl-popup-tip { border-top-color: var(--surface-1); border-bottom-color: var(--surface-1); }
+  .maplibregl-ctrl-attrib { font-size: 10px; }
+
+  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-top: 1px solid var(--border); background: var(--surface-1); }
+  .tabs button {
+    width: auto; background: none; border: 0; border-bottom: 2px solid transparent;
+    border-radius: 0; color: var(--text-muted); padding: 6px 10px;
+  }
+  .tabs button[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--series-1); }
+  .tabs .spacer { flex: 1; }
+
+  .panel-body { overflow: auto; padding: 10px 14px; background: var(--surface-1); min-height: 0; }
+  .panel-body h2 { margin: 0 0 2px; font-size: 13px; font-weight: 600; }
+  .panel-body .cap { margin: 0 0 8px; font-size: 11px; color: var(--text-muted); }
+  .chart { min-height: 150px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary); margin: 4px 0 0; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  table.grid { border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; width: 100%; }
+  table.grid th, table.grid td { border-bottom: 1px solid var(--border); padding: 3px 10px 3px 0; text-align: left; white-space: nowrap; }
+  table.grid th { color: var(--text-muted); font-weight: 500; position: sticky; top: 0; background: var(--surface-1); }
+  table.grid td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll-x { overflow-x: auto; }
+
+  #log { border-top: 1px solid var(--border); background: var(--bg); max-height: 148px; overflow-y: auto; }
+  #log summary { padding: 5px 14px; cursor: pointer; color: var(--text-muted); font-size: 11.5px;
+                 position: sticky; top: 0; background: var(--bg); }
+  #log table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  #log td { padding: 3px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+  #log td.q { color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
+  #log td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--text-secondary); }
+  #log .saved { color: var(--good); }
+  .err { color: #e66767; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PCDS Explorer</h1>
+  <span class="sub" id="archive-sub">reading manifest&hellip;</span>
+  <span class="spacer"></span>
+  <span id="status" class="busy">booting DuckDB-WASM</span>
+</header>
+
+<main>
+  <aside>
+    <div class="field">
+      <label for="var-group">Variable</label>
+      <select id="var-group"></select>
+      <span class="hint" id="var-hint">&nbsp;</span>
+    </div>
+
+    <div class="field">
+      <label>Years</label>
+      <div class="row">
+        <input id="y0" type="number" inputmode="numeric" step="1">
+        <span class="hint">to</span>
+        <input id="y1" type="number" inputmode="numeric" step="1">
+      </div>
+      <span class="hint" id="period-hint">&nbsp;</span>
+    </div>
+
+    <div class="field">
+      <label for="network">Network</label>
+      <select id="network"><option value="">all networks</option></select>
+    </div>
+
+    <div class="field">
+      <label for="search">Station</label>
+      <input id="search" type="search" placeholder="name or id" autocomplete="off">
+      <ul id="results"></ul>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat"><div class="k">Fetched</div><div class="v" id="stat-bytes">0 B</div>
+        <div class="k" id="stat-bytes-sub">no partitions yet</div></div>
+      <div class="stat"><div class="k">Archive</div><div class="v" id="stat-total">&mdash;</div></div>
+    </div>
+    <p class="hint" id="prune-hint">Read live from an S3 bucket on another origin.
+      A year window selects partitions, and only those objects are fetched; the rest of the
+      archive is never touched. Objects already pulled are answered from cache, so the
+      second question about a period is free.</p>
+  </aside>
+
+  <section class="panels">
+    <div id="map"></div>
+
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="series" aria-selected="true">Series</button>
+      <button role="tab" data-tab="climo" aria-selected="false">Climatology</button>
+      <button role="tab" data-tab="network" aria-selected="false">Network</button>
+      <button role="tab" data-tab="sql" aria-selected="false">SQL</button>
+      <span class="spacer"></span>
+      <button id="paint" style="width:auto;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-secondary);margin-bottom:6px">Colour map by mean</button>
+    </div>
+
+    <div class="panel-body" id="panel"></div>
+    <details id="log" open>
+      <summary>Query log &mdash; SQL, wall time, rows, and the partition bytes each query pulled</summary>
+      <table><tbody id="log-rows"></tbody></table>
+    </details>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.17/dist/plot.umd.min.js"></script>
+<script type="module">
+import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
+
+const $ = (id) => document.getElementById(id);
+// The page reads the archive as a remote bucket over a cross-origin HTTPS API,
+// never as files beside itself, so the deployed build and a local checkout differ
+// only in which bucket they point at. ?base= overrides either.
+const PUBLISHED = 'https://data.source.coop/alukach/pcds/';
+const LOCAL = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
+const BASE = (new URLSearchParams(location.search).get('base')
+  || (LOCAL ? `${location.protocol}//${location.hostname}:8788/pcds/` : PUBLISHED)
+).replace(/\/?$/, '/');
+
+/* ---------------------------------------------------------------- sharing */
+
+/** The whole view lives in the query string, so a link reproduces what the
+ *  sharer was looking at. Variables are named rather than indexed: an index into
+ *  the variables table would silently point somewhere else the next time a
+ *  network adds a sensor. */
+const START = new URLSearchParams(location.search);
+const VIEW_KEYS = ['var', 'y0', 'y1', 'net', 'st', 'tab', 'paint', 'sql'];
+const SHARED = VIEW_KEYS.some((k) => START.has(k));
+
+function writeUrl() {
+  if (!state.group) return;
+  const p = new URLSearchParams();
+  if (START.get('base')) p.set('base', START.get('base'));
+  p.set('var', [state.group.standard_name, state.group.cell_method ?? '', state.group.unit ?? ''].join('~'));
+  p.set('y0', $('y0').value);
+  p.set('y1', $('y1').value);
+  if ($('network').value) p.set('net', $('network').value);
+  if (state.station) p.set('st', state.station.station_id);
+  if (state.tab !== 'series') p.set('tab', state.tab);
+  if (state.paintedBy) p.set('paint', '1');
+  // A pasted query belongs in the link too, but not at any length: past a couple
+  // of kilobytes the URL stops surviving the trip through chat clients.
+  if (state.tab === 'sql' && state.lastSql && state.lastSql.length <= 1500) p.set('sql', state.lastSql);
+  history.replaceState(null, '', `${location.pathname}?${p}`);
+}
+
+const CAT = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
+// Sequential blue for a dark surface runs dark -> light: near-zero recedes into
+// the basemap, high values pop off it. Celsius gets the diverging pair instead,
+// because 0 C is a real midpoint and cold/warm is genuine polarity.
+const RAMP_SEQ  = ['#184f95', '#256abf', '#3987e5', '#6da7ec', '#9ec5f4', '#cde2fb'];
+const RAMP_DIV  = ['#1c5cab', '#3987e5', '#86b6ef', '#6b6a64', '#e89a9a', '#e34948', '#a82a2a'];
+
+const fmtBytes = (n) => n < 1024 ? `${n} B`
+  : n < 1048576 ? `${(n / 1024).toFixed(0)} KB`
+  : `${(n / 1048576).toFixed(n < 10485760 ? 2 : 1)} MB`;
+const fmtNum = (n) => n == null ? '' : n.toLocaleString('en-US');
+const fmtVal = (n) => n == null ? '' : (Math.abs(n) >= 1000 || n === 0 ? n.toFixed(0) : n.toFixed(2));
+
+const state = {
+  db: null, conn: null,
+  summary: null, periods: [], byPeriod: new Map(), pulled: new Set(),
+  groups: [], group: null,
+  stations: [], station: null, stationChosen: false,
+  paintedBy: null,
+  tab: 'series',
+};
+
+/* ---------------------------------------------------------------- plumbing */
+
+function setStatus(text, kind = 'ready') {
+  const el = $('status');
+  el.textContent = text;
+  el.className = kind;
+}
+
+/** What a query costs over the wire.
+ *
+ *  The page cannot measure its own bytes: DuckDB fetches from inside a worker,
+ *  where Resource Timing does not reach. It does not need to. DuckDB-WASM pulls
+ *  each Parquet object whole, so a query against partitions it has not seen
+ *  before transfers exactly those objects, and the manifest already carries
+ *  their sizes. Counting them once per session is therefore exact, not an
+ *  estimate, for as long as the whole-object behaviour above holds. */
+function pull(periods) {
+  let bytes = 0;
+  for (const p of periods ?? []) {
+    if (state.pulled.has(p)) continue;
+    state.pulled.add(p);
+    bytes += state.byPeriod.get(p)?.bytes ?? 0;
+  }
+  if (bytes) {
+    totalFetched += bytes;
+    $('stat-bytes').textContent = fmtBytes(totalFetched);
+    $('stat-bytes-sub').textContent =
+      `${state.pulled.size} of ${state.byPeriod.size} partitions`;
+  }
+  return bytes;
+}
+
+let totalFetched = 0;
+
+/** Run SQL, and account for it: wall time, bytes the server actually sent, and
+ *  how much of the archive the partition filter left on the table. */
+async function q(label, sql, periods) {
+  const wire = pull(periods);
+  const t0 = performance.now();
+  let res;
+  try {
+    res = await state.conn.query(sql);
+  } catch (err) {
+    logRow(label, sql, null, null, null, null, String(err));
+    throw err;
+  }
+  const ms = performance.now() - t0;
+  const candidate = periods
+    ? periods.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0)
+    : null;
+  logRow(label, sql, ms, periods ? wire : null, res.numRows, candidate);
+  return toRows(res);
+}
+
+function toRows(res) {
+  return res.toArray().map((r) => {
+    const o = r.toJSON();
+    for (const k in o) if (typeof o[k] === 'bigint') o[k] = Number(o[k]);
+    return o;
+  });
+}
+
+function logRow(label, sql, ms, wire, rows, candidate, error) {
+  const tr = document.createElement('tr');
+  const total = state.summary?.bytes ?? 0;
+  let note = '';
+  if (candidate != null && total) {
+    const pct = (100 * (1 - candidate / total)).toFixed(0);
+    note = ` · ${fmtBytes(candidate)} candidate (${pct}% of archive pruned by partition)`;
+  }
+  tr.innerHTML = `
+    <td class="q"><b style="color:var(--text-secondary)">${label}</b>${error ? '' : note}
+      <div>${error ? `<span class="err">${esc(error)}</span>` : esc(sql)}</div></td>
+    <td class="n">${ms == null ? '' : `${ms.toFixed(0)} ms`}</td>
+    <td class="n">${rows == null ? '' : `${fmtNum(rows)} rows`}</td>
+    <td class="n ${wire === 0 ? 'saved' : ''}">${wire == null ? '' : (wire === 0 ? 'cached' : fmtBytes(wire))}</td>`;
+  $('log-rows').prepend(tr);
+  while ($('log-rows').children.length > 40) $('log-rows').lastChild.remove();
+}
+
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+/* ----------------------------------------------------------------- catalog */
+
+/** `period` is an opaque partition label, not a year: '1872-1903' sorts below
+ *  '1900' as a string, so a year range has to be resolved to labels rather than
+ *  compared to them. The years come from `_manifest/files.parquet`, which records
+ *  the observations each object actually holds; layout.json plans the whole walk,
+ *  including years nobody has ingested yet, and is not published with the data. */
+function periodsFor(y0, y1) {
+  return state.periods
+    .filter((p) => p.end_year >= y0 && p.start_year <= y1)
+    .map((p) => p.period);
+}
+
+const obsUrls = (periods) =>
+  periods.flatMap((p) => state.byPeriod.get(p).paths).map((u) => `'${u}'`).join(', ');
+
+const years = () => {
+  const y0 = Math.min(+$('y0').value, +$('y1').value);
+  const y1 = Math.max(+$('y0').value, +$('y1').value);
+  return [y0, y1];
+};
+
+const varIds = () => `[${state.group.ids.join(',')}]::SMALLINT[]`;
+
+/* -------------------------------------------------------------------- boot */
+
+async function boot() {
+  const summary = await fetch(BASE + '_manifest/summary.json').then((r) => r.json());
+  state.summary = summary;
+
+  const yMin = new Date(summary.obs_time_min + 'Z').getUTCFullYear();
+  const yMax = new Date(summary.obs_time_max + 'Z').getUTCFullYear();
+  $('archive-sub').textContent =
+    `${fmtNum(summary.rows)} observations · ${summary.files} Parquet objects · ${fmtBytes(summary.bytes)} · ${yMin}–${yMax}`;
+  $('stat-total').textContent = fmtBytes(summary.bytes);
+  for (const el of [$('y0'), $('y1')]) { el.min = yMin; el.max = yMax; }
+
+  setStatus('starting DuckDB-WASM', 'busy');
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const workerUrl = URL.createObjectURL(
+    new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+  state.db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(workerUrl));
+  await state.db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  URL.revokeObjectURL(workerUrl);
+  // DuckDB-WASM buffers each Parquet object whole: Chrome drops the `Range`
+  // header from the probe its worker makes, so it never learns the object is
+  // range-readable and falls back to a full GET. Partition pruning still does the
+  // heavy lifting (one object instead of twenty), and every later query against a
+  // partition already pulled is free. Native DuckDB over this same bucket prunes
+  // further, to row groups: 50 KiB of a 10.7 MiB object for a single station.
+  await state.db.open({ query: { castBigIntToDouble: true, castTimestampToDate: true } });
+  state.conn = await state.db.connect();
+
+  setStatus('reading catalog', 'busy');
+  for (const [name, path] of [
+    ['stations', 'stations/stations.parquet'],
+    ['histories', 'histories/histories.parquet'],
+    ['variables', 'variables/variables.parquet'],
+    ['networks', 'networks/networks.parquet'],
+    ['files', '_manifest/files.parquet'],
+  ]) {
+    await state.conn.query(
+      `CREATE VIEW ${name} AS SELECT * ${name === 'stations' || name === 'histories' ? 'EXCLUDE (geometry)' : ''} ` +
+      `FROM read_parquet('${BASE}${path}')`);
+  }
+
+  // The manifest is the authority on what is in the bucket: which objects exist,
+  // how big they are, and which years each one actually covers. A stray prefix
+  // upstream that the manifest does not list stays invisible here, which is the
+  // behaviour you want.
+  state.periods = await q('manifest', `
+    SELECT period,
+           min(year(obs_time_min)) AS start_year,
+           max(year(obs_time_max)) AS end_year,
+           -- sum() of a BIGINT widens to HUGEINT, which crosses into JS as a
+           -- string and turns every byte total into string concatenation.
+           sum(file_bytes)::BIGINT AS bytes, sum(rows)::BIGINT AS rows,
+           list(path ORDER BY path) AS paths
+    FROM files GROUP BY 1 ORDER BY start_year, end_year`);
+  for (const p of state.periods) {
+    p.paths = Array.from(p.paths, (path) => BASE + path);
+    state.byPeriod.set(p.period, p);
+  }
+
+  const newest = state.periods[state.periods.length - 1];
+  $('y0').value = START.get('y0') ?? Math.max(yMin, newest.start_year);
+  $('y1').value = START.get('y1') ?? Math.min(yMax, newest.end_year);
+
+  // One view over every partition object. hive_partitioning exposes `period`, and
+  // a filter on it drops whole objects at bind time without opening them.
+  await state.conn.query(
+    `CREATE VIEW observations AS SELECT * FROM read_parquet(` +
+    `[${obsUrls(state.periods.map((p) => p.period))}], hive_partitioning = true)`);
+
+  // variable_id is network-scoped: air temperature has a different id in each of
+  // the 22 networks, so a variable is only meaningful as standard_name + cell_method.
+  state.groups = await q('variable groups', `
+    SELECT standard_name, cell_method, unit,
+           any_value(display_name) AS display_name,
+           list(variable_id ORDER BY variable_id) AS ids,
+           count(DISTINCT network_id) AS networks
+    FROM variables
+    WHERE standard_name IS NOT NULL
+    GROUP BY 1, 2, 3
+    ORDER BY networks DESC, standard_name`);
+  state.groups.forEach((g) => { g.ids = Array.from(g.ids); });
+
+  $('var-group').innerHTML = state.groups
+    .map((g, i) => `<option value="${i}">${esc(g.display_name || g.standard_name)} — ${esc(shortCell(g.cell_method))} (${g.unit || '?'})</option>`)
+    .join('');
+  const wanted = (START.get('var') ?? '').split('~');
+  const preferred = state.groups.findIndex((g) => START.has('var')
+    ? (g.standard_name === wanted[0] && (g.cell_method ?? '') === (wanted[1] ?? '')
+       && (g.unit ?? '') === (wanted[2] ?? ''))
+    : (g.standard_name === 'air_temperature' && g.cell_method === 'time: point'));
+  $('var-group').value = String(preferred < 0 ? 0 : preferred);
+  state.group = state.groups[preferred < 0 ? 0 : preferred];
+
+  const nets = await q('networks', `SELECT network_name, long_name, station_count FROM networks ORDER BY station_count DESC`);
+  $('network').insertAdjacentHTML('beforeend', nets
+    .map((n) => `<option value="${esc(n.network_name)}">${esc(n.network_name)} (${fmtNum(n.station_count)})</option>`).join(''));
+
+  if (START.has('net')
+      && [...$('network').options].some((o) => o.value === START.get('net'))) {
+    $('network').value = START.get('net');
+  }
+  if (START.has('tab')) {
+    const b = document.querySelector(`.tabs [data-tab="${CSS.escape(START.get('tab'))}"]`);
+    if (b) {
+      state.tab = START.get('tab');
+      for (const o of document.querySelectorAll('.tabs [role=tab]')) o.setAttribute('aria-selected', String(o === b));
+    }
+  }
+  if (START.has('sql')) state.lastSql = START.get('sql');
+
+  initMap();
+  wireEvents();
+  await refreshStations(true);
+  if (START.has('st')) {
+    state.stationChosen = true;
+    await selectStation(START.get('st'));
+  }
+  // A bare link gets the guided opening: one scan of the newest partition, which
+  // colours the map, picks a station worth showing, and leaves the object cached
+  // so every later query in this window costs nothing. A shared link gets exactly
+  // what was shared instead, including the absence of that scan.
+  if (SHARED ? START.get('paint') === '1' : true) await paintByMean();
+  writeUrl();
+  setStatus('ready');
+}
+
+const shortCell = (c) => (c || '').replace(/t: /g, '').replace(/time: /g, '').slice(0, 42);
+
+/* --------------------------------------------------------------------- map */
+
+let map, popup;
+let mapLoaded, mapIsLoaded;
+
+function initMap() {
+  mapLoaded = new Promise((res) => { mapIsLoaded = res; });
+  map = new maplibregl.Map({
+    container: 'map',
+    style: {
+      version: 8,
+      sources: {
+        // Keyless, and dark by design: a basemap meant to sit under data rather
+        // than compete with it. CARTO's dark tiles now want an API key.
+        basemap: {
+          type: 'raster', tileSize: 256, maxzoom: 16,
+          tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/'
+                  + 'World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'],
+          attribution: 'Esri, HERE, Garmin, © OpenStreetMap contributors',
+        },
+      },
+      layers: [{ id: 'base', type: 'raster', source: 'basemap', paint: { 'raster-opacity': 0.9 } }],
+    },
+    center: [-124.5, 54.2], zoom: 4.1, attributionControl: { compact: true },
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+  map.on('error', (e) => console.error('maplibre', e && e.error));
+  popup = new maplibregl.Popup({ closeButton: false, offset: 8 });
+
+  // 'load' waits for the first paint, which never comes in a background tab.
+  // Everything here needs the style, not a frame, so key off the style instead.
+  const onStyle = () => {
+    // getLayer on our own basemap layer is the public signal that the style spec
+    // has been parsed. isStyleLoaded() additionally waits on tiles, which is more
+    // than adding a source needs.
+    if (!map.getLayer('base') || map.getSource('stations')) return;
+    map.addSource('stations', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'stations', type: 'circle', source: 'stations',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 3, 2.6, 8, 6],
+        'circle-color': '#3987e5',
+        'circle-opacity': 0.85,
+        'circle-stroke-width': 0.5,
+        'circle-stroke-color': '#1a1a19',
+      },
+    });
+    map.addLayer({
+      id: 'selected', type: 'circle', source: 'stations',
+      filter: ['==', ['get', 'station_id'], -1],
+      paint: { 'circle-radius': 8, 'circle-color': 'transparent', 'circle-stroke-width': 2.5, 'circle-stroke-color': '#ffffff' },
+    });
+
+    map.on('mousemove', 'stations', (e) => {
+      map.getCanvas().style.cursor = 'pointer';
+      const p = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(
+        `<b>${esc(p.station_name || p.native_id)}</b><br>
+         <span style="color:var(--text-muted)">${esc(p.network_name)} · ${p.elevation ?? '?'} m</span>
+         ${p.painted != null ? `<br>mean ${fmtVal(p.painted)} ${esc(state.paintedBy?.unit || '')} (n=${fmtNum(p.painted_n)})` : ''}`)
+        .addTo(map);
+    });
+    map.on('mouseleave', 'stations', () => { map.getCanvas().style.cursor = ''; popup.remove(); });
+    map.on('click', 'stations', (e) => selectStation(e.features[0].properties.station_id));
+    mapIsLoaded();
+  };
+  map.on('load', onStyle);
+  map.on('styledata', onStyle);
+  map.on('sourcedata', onStyle);
+  onStyle();
+}
+
+async function paintStations() {
+  await mapLoaded;
+  const painted = state.stations.filter((s) => s.painted != null).map((s) => s.painted)
+    .sort((a, b) => a - b);
+  const pick = (f) => painted[Math.min(painted.length - 1, Math.floor(f * painted.length))];
+  const lo = painted.length ? pick(0.02) : 0;
+  const hi = painted.length ? pick(0.98) : 1;
+  const diverging = state.paintedBy?.unit === 'celsius' && lo < 0 && hi > 0;
+  const ramp = diverging ? RAMP_DIV : RAMP_SEQ;
+
+  map.getSource('stations').setData({
+    type: 'FeatureCollection',
+    features: state.stations.map((s) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+      properties: {
+        ...s,
+        color: s.painted == null ? (painted.length ? '#4a4a45' : '#3987e5')
+          : rampColor(ramp, diverging ? divT(s.painted, lo, hi) : (s.painted - lo) / (hi - lo || 1)),
+      },
+    })),
+  });
+  map.setPaintProperty('stations', 'circle-color', ['get', 'color']);
+  map.setPaintProperty('stations', 'circle-radius',
+    painted.length ? ['interpolate', ['linear'], ['zoom'], 3, ['case', ['==', ['get', 'painted'], null], 2, 4], 8, 8]
+                   : ['interpolate', ['linear'], ['zoom'], 3, 2.6, 8, 6]);
+  renderMapLegend(lo, hi, ramp, diverging);
+}
+
+/** Map a diverging value so that zero always lands on the neutral midpoint. */
+function divT(v, lo, hi) {
+  const span = Math.max(-lo, hi);
+  return (v / span + 1) / 2;
+}
+
+function rampColor(ramp, t) {
+  t = Math.min(1, Math.max(0, t));
+  const x = t * (ramp.length - 1);
+  const i = Math.min(ramp.length - 2, Math.floor(x));
+  return mix(ramp[i], ramp[i + 1], x - i);
+}
+
+function mix(a, b, t) {
+  const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const [r1, g1, b1] = p(a), [r2, g2, b2] = p(b);
+  const c = (x, y) => Math.round(x + (y - x) * t).toString(16).padStart(2, '0');
+  return `#${c(r1, r2)}${c(g1, g2)}${c(b1, b2)}`;
+}
+
+function renderMapLegend(lo, hi, ramp, diverging) {
+  document.querySelector('#map .legend-box')?.remove();
+  if (state.paintedBy == null) return;
+  const span = diverging ? Math.max(-lo, hi) : 0;
+  const stops = ramp.map((c) => `${c}`).join(',');
+  const el = document.createElement('div');
+  el.className = 'legend-box';
+  el.style.cssText = `position:absolute;left:10px;bottom:24px;background:var(--surface-1);border:1px solid var(--border);
+    border-radius:var(--radius);padding:7px 9px;font-size:11px;color:var(--text-secondary);pointer-events:none;z-index:2`;
+  el.innerHTML = `<div style="color:var(--text-primary);margin-bottom:4px">mean ${esc(state.paintedBy.label)} (${esc(state.paintedBy.unit || '')})</div>
+    <div style="width:150px;height:9px;border-radius:2px;background:linear-gradient(to right,${stops})"></div>
+    <div style="display:flex;justify-content:space-between;font-variant-numeric:tabular-nums">
+      <span>${fmtVal(diverging ? -span : lo)}</span><span>${fmtVal(diverging ? span : hi)}</span></div>
+    <div style="color:var(--text-muted);margin-top:3px">grey = no data in range</div>`;
+  $('map').appendChild(el);
+}
+
+/* ---------------------------------------------------------------- stations */
+
+async function refreshStations(fit = false) {
+  const [y0, y1] = years();
+  const net = $('network').value;
+  state.paintedBy = null;
+  const rows = await q('stations for variable + window', `
+    SELECT station_id, station_name, native_id, network_name, lon, lat, elevation,
+           history_count, min_obs_time, max_obs_time
+    FROM stations
+    WHERE lon IS NOT NULL AND lat IS NOT NULL
+      AND list_has_any(variable_ids, ${varIds()})
+      AND year(max_obs_time) >= ${y0} AND year(min_obs_time) <= ${y1}
+      ${net ? `AND network_name = '${net.replace(/'/g, "''")}'` : ''}
+    ORDER BY station_id`);
+  state.stations = rows;
+  $('var-hint').textContent =
+    `${fmtNum(state.group.ids.length)} network-scoped ids · ${fmtNum(rows.length)} stations report it`;
+  $('period-hint').textContent = (() => {
+    const ps = periodsFor(y0, y1);
+    const bytes = ps.reduce((a, p) => a + (state.byPeriod.get(p)?.bytes ?? 0), 0);
+    return `${ps.length}/${state.byPeriod.size} partitions · ${fmtBytes(bytes)} reachable`;
+  })();
+
+  paintStations();
+  renderStationList();
+  if (fit && rows.length) {
+    const lons = rows.map((r) => r.lon), lats = rows.map((r) => r.lat);
+    map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+      { padding: 30, duration: 0 });
+  }
+  if (!state.stations.some((s) => s.station_id === state.station?.station_id)) {
+    state.station = rows.slice().sort((a, b) => b.history_count - a.history_count)[0] ?? null;
+    state.stationChosen = false;
+  }
+  render();
+  writeUrl();
+}
+
+function renderStationList() {
+  const term = $('search').value.trim().toLowerCase();
+  const hits = state.stations
+    .filter((s) => !term || `${s.station_name} ${s.native_id} ${s.station_id}`.toLowerCase().includes(term))
+    .sort((a, b) => (b.painted_n ?? -1) - (a.painted_n ?? -1))
+    .slice(0, 60);
+  $('results').innerHTML = hits.map((s) => `
+    <li data-id="${s.station_id}">
+      <span class="nm">${esc(s.station_name || s.native_id)}</span>
+      <span class="meta">${esc(s.network_name)} · #${s.station_id}${
+        s.painted_n ? ` · ${fmtNum(s.painted_n)} obs` : ''}</span>
+    </li>`).join('') || `<li class="meta" style="cursor:default;padding:8px">no stations match</li>`;
+}
+
+async function selectStation(id, chosen = true) {
+  state.station = state.stations.find((s) => s.station_id === Number(id)) ?? state.station;
+  if (chosen) state.stationChosen = true;
+  mapLoaded.then(() => map.setFilter('selected', ['==', ['get', 'station_id'], Number(id)]));
+  await render();
+  writeUrl();
+}
+
+/* ------------------------------------------------------------------ panels */
+
+function wireEvents() {
+  $('var-group').onchange = () => { state.group = state.groups[+$('var-group').value]; refreshStations(); };
+  $('network').onchange = () => refreshStations(true);
+  $('search').oninput = renderStationList;
+  $('results').onclick = (e) => {
+    const li = e.target.closest('li[data-id]');
+    if (li) selectStation(li.dataset.id);
+  };
+  for (const el of [$('y0'), $('y1')]) el.onchange = () => refreshStations();
+  $('paint').onclick = paintByMean;
+  for (const b of document.querySelectorAll('.tabs [role=tab]')) {
+    b.onclick = () => {
+      state.tab = b.dataset.tab;
+      for (const o of document.querySelectorAll('.tabs [role=tab]')) o.setAttribute('aria-selected', String(o === b));
+      render();
+    };
+  }
+}
+
+async function render() {
+  const panel = $('panel');
+  writeUrl();
+  setStatus('querying', 'busy');
+  try {
+    if (state.tab === 'series') await renderSeries(panel);
+    else if (state.tab === 'climo') await renderClimo(panel);
+    else if (state.tab === 'network') await renderNetwork(panel);
+    else renderSql(panel);
+    setStatus('ready');
+  } catch (err) {
+    panel.innerHTML = `<p class="err">${esc(String(err))}</p>`;
+    setStatus('query failed', 'error');
+  }
+}
+
+function frame(panel, title, caption) {
+  panel.innerHTML = `<h2>${esc(title)}</h2><p class="cap">${caption}</p><div class="chart"></div><div class="legend"></div>`;
+  return panel.querySelector('.chart');
+}
+
+const plotStyle = {
+  style: { background: 'transparent', color: 'var(--text-secondary)', fontSize: '11px' },
+  marginLeft: 52, marginBottom: 32, marginRight: 14,
+  grid: true,
+};
+
+function legend(panel, items) {
+  panel.querySelector('.legend').innerHTML = items
+    .map(([c, t]) => `<span><i style="background:${c}"></i>${esc(t)}</span>`).join('');
+}
+
+/** Hourly data over decades is more points than pixels; roll it up in SQL so the
+ *  bytes stay in DuckDB and only the drawn series crosses into JS. */
+function grainFor(y0, y1) {
+  const span = y1 - y0 + 1;
+  return span > 25 ? 'month' : span > 3 ? 'day' : 'hour';
+}
+
+async function renderSeries(panel) {
+  if (!state.station) { panel.innerHTML = `<p class="cap">Pick a station on the map.</p>`; return; }
+  const [y0, y1] = years();
+  const periods = periodsFor(y0, y1);
+  const grain = grainFor(y0, y1);
+  const s = state.station;
+  const chart = frame(panel, `${s.station_name || s.native_id} — ${state.group.display_name || state.group.standard_name}`,
+    `${esc(s.network_name)} · station #${s.station_id} · rolled up per ${grain}. Only the partitions covering ` +
+    `these years are fetched; the other ${state.byPeriod.size - periods.length} objects in the bucket are never touched.`);
+
+  const rows = await q(`series · station ${s.station_id}`, `
+    SELECT epoch_ms(date_trunc('${grain}', obs_time)) AS t,
+           avg(value) AS v, min(value) AS lo, max(value) AS hi, count(value) AS n
+    FROM observations
+    WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
+      AND station_id = ${s.station_id}
+      AND variable_id IN (${state.group.ids.join(',')})
+      AND value IS NOT NULL
+      AND obs_time >= TIMESTAMP '${y0}-01-01' AND obs_time < TIMESTAMP '${y1 + 1}-01-01'
+    GROUP BY 1 ORDER BY 1`, periods);
+
+  if (!rows.length) {
+    panel.querySelector('.chart').innerHTML =
+      `<p class="cap">No observations for this station, variable and window inside the archive.</p>`;
+    return;
+  }
+  const data = rows.map((r) => ({ ...r, t: new Date(r.t) }));
+  const unit = state.group.unit || '';
+  chart.append(Plot.plot({
+    ...plotStyle, height: 230, width: chart.clientWidth || 820,
+    x: { type: 'utc', label: null },
+    y: { label: `${state.group.standard_name} (${unit})`, labelAnchor: 'top' },
+    marks: [
+      ...(grain === 'hour' ? []
+        : [Plot.areaY(data, { x: 't', y1: 'lo', y2: 'hi', fill: 'var(--series-1)', fillOpacity: 0.2 })]),
+      Plot.lineY(data, { x: 't', y: 'v', stroke: 'var(--series-1)', strokeWidth: 1.6 }),
+      Plot.ruleY([0], { stroke: 'var(--border)' }),
+      Plot.tip(data, Plot.pointerX({
+        x: 't', y: 'v',
+        title: (d) => `${d.t.toISOString().slice(0, grain === 'hour' ? 13 : 10)}\nmean ${fmtVal(d.v)} ${unit}\nrange ${fmtVal(d.lo)} – ${fmtVal(d.hi)}\n${fmtNum(d.n)} obs`,
+      })),
+    ],
+  }));
+  legend(panel, grain === 'hour'
+    ? [['var(--series-1)', 'hourly observation']]
+    : [['var(--series-1)', `mean per ${grain}`], ['rgba(57,135,229,.35)', `min–max within ${grain}`]]);
+}
+
+async function renderClimo(panel) {
+  if (!state.station) { panel.innerHTML = `<p class="cap">Pick a station on the map.</p>`; return; }
+  const [y0, y1] = years();
+  const periods = periodsFor(y0, y1);
+  const s = state.station;
+  const chart = frame(panel, `Monthly climatology — ${s.station_name || s.native_id}`,
+    `${y0}–${y1}, every observation in the window folded onto one year. ` +
+    `Same partitions as the series tab, so this costs nothing more: DuckDB aggregates the ` +
+    `object it already holds and only twelve rows cross into the browser.`);
+
+  const rows = await q(`climatology · station ${s.station_id}`, `
+    SELECT month(obs_time) AS m, avg(value) AS mean,
+           quantile_cont(value, 0.1) AS p10, quantile_cont(value, 0.9) AS p90,
+           min(value) AS lo, max(value) AS hi, count(value) AS n
+    FROM observations
+    WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
+      AND station_id = ${s.station_id}
+      AND variable_id IN (${state.group.ids.join(',')})
+      AND value IS NOT NULL
+      AND obs_time >= TIMESTAMP '${y0}-01-01' AND obs_time < TIMESTAMP '${y1 + 1}-01-01'
+    GROUP BY 1 ORDER BY 1`, periods);
+
+  if (!rows.length) { panel.querySelector('.chart').innerHTML = `<p class="cap">No observations in this window.</p>`; return; }
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const unit = state.group.unit || '';
+  chart.append(Plot.plot({
+    ...plotStyle, height: 230, width: chart.clientWidth || 820,
+    x: { label: null, tickFormat: (m) => MONTHS[m - 1], ticks: rows.map((r) => r.m) },
+    y: { label: `${state.group.standard_name} (${unit})`, labelAnchor: 'top' },
+    marks: [
+      Plot.areaY(rows, { x: 'm', y1: 'lo', y2: 'hi', fill: 'var(--series-1)', fillOpacity: 0.12, curve: 'monotone-x' }),
+      Plot.areaY(rows, { x: 'm', y1: 'p10', y2: 'p90', fill: 'var(--series-1)', fillOpacity: 0.28, curve: 'monotone-x' }),
+      Plot.lineY(rows, { x: 'm', y: 'mean', stroke: 'var(--series-1)', strokeWidth: 2, curve: 'monotone-x' }),
+      Plot.dot(rows, { x: 'm', y: 'mean', fill: 'var(--series-1)', r: 4, stroke: 'var(--surface-1)', strokeWidth: 2 }),
+      Plot.ruleY([0], { stroke: 'var(--border)' }),
+      Plot.tip(rows, Plot.pointerX({
+        x: 'm', y: 'mean',
+        title: (d) => `${MONTHS[d.m - 1]}\nmean ${fmtVal(d.mean)} ${unit}\np10–p90 ${fmtVal(d.p10)} – ${fmtVal(d.p90)}\nextremes ${fmtVal(d.lo)} – ${fmtVal(d.hi)}\n${fmtNum(d.n)} obs`,
+      })),
+    ],
+  }));
+  legend(panel, [['var(--series-1)', 'monthly mean'], ['rgba(57,135,229,.45)', 'p10–p90'], ['rgba(57,135,229,.2)', 'observed extremes']]);
+}
+
+async function renderNetwork(panel) {
+  const [y0, y1] = years();
+  const periods = periodsFor(y0, y1);
+  const net = $('network').value;
+  const chart = frame(panel, `Every station at once — ${state.group.display_name || state.group.standard_name}`,
+    `${y0}–${y1}${net ? `, ${esc(net)}` : ', all networks'}. This one scans the full value column of ` +
+    `${periods.length} partition${periods.length === 1 ? '' : 's'} — the honest cost of a question that names no station.`);
+
+  const rows = await q('annual mean across all reporting stations', `
+    SELECT year(o.obs_time) AS y,
+           avg(o.value) AS mean,
+           count(DISTINCT o.station_id) AS stations,
+           count(o.value) AS n
+    FROM observations o
+    ${net ? `JOIN stations s USING (station_id)` : ''}
+    WHERE o.period IN (${periods.map((p) => `'${p}'`).join(',')})
+      AND o.variable_id IN (${state.group.ids.join(',')})
+      AND o.value IS NOT NULL
+      AND o.obs_time >= TIMESTAMP '${y0}-01-01' AND o.obs_time < TIMESTAMP '${y1 + 1}-01-01'
+      ${net ? `AND s.network_name = '${net.replace(/'/g, "''")}'` : ''}
+    GROUP BY 1 ORDER BY 1`, periods);
+
+  if (!rows.length) { panel.querySelector('.chart').innerHTML = `<p class="cap">Nothing reported in this window.</p>`; return; }
+  const unit = state.group.unit || '';
+  const w = chart.clientWidth || 820;
+  chart.append(Plot.plot({
+    ...plotStyle, height: 190, width: w,
+    x: { label: null, tickFormat: (d) => String(d) },
+    y: { label: `annual mean (${unit})`, labelAnchor: 'top' },
+    marks: [
+      Plot.lineY(rows, { x: 'y', y: 'mean', stroke: 'var(--series-1)', strokeWidth: 2 }),
+      Plot.dot(rows, { x: 'y', y: 'mean', fill: 'var(--series-1)', r: 4, stroke: 'var(--surface-1)', strokeWidth: 2 }),
+      Plot.tip(rows, Plot.pointerX({ x: 'y', y: 'mean',
+        title: (d) => `${d.y}\nmean ${fmtVal(d.mean)} ${unit}\n${fmtNum(d.stations)} stations\n${fmtNum(d.n)} obs` })),
+    ],
+  }));
+  // Station count is a different measure on a different scale, so it gets its own
+  // chart. Never a second y-axis.
+  chart.insertAdjacentHTML('beforeend', `<p class="cap" style="margin-top:10px">Stations contributing, by year</p>`);
+  chart.append(Plot.plot({
+    ...plotStyle, height: 110, width: w,
+    x: { label: null, tickFormat: (d) => String(d) },
+    y: { label: 'stations', labelAnchor: 'top' },
+    marks: [
+      Plot.barY(rows, { x: 'y', y: 'stations', fill: 'var(--series-3)', rx: 2, insetLeft: 1, insetRight: 1 }),
+      Plot.tip(rows, Plot.pointerX({ x: 'y', y: 'stations', title: (d) => `${d.y}\n${fmtNum(d.stations)} stations` })),
+    ],
+  }));
+  legend(panel, [['var(--series-1)', `annual mean ${unit}`], ['var(--series-3)', 'stations reporting']]);
+}
+
+/* ---------------------------------------------------------------- map paint */
+
+async function paintByMean() {
+  const [y0, y1] = years();
+  const periods = periodsFor(y0, y1);
+  $('paint').disabled = true;
+  setStatus('scanning partitions', 'busy');
+  try {
+    const rows = await q('per-station mean (recolours the map)', `
+      SELECT station_id, avg(value) AS painted, count(value) AS painted_n
+      FROM observations
+      WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
+        AND variable_id IN (${state.group.ids.join(',')})
+        AND value IS NOT NULL
+        AND obs_time >= TIMESTAMP '${y0}-01-01' AND obs_time < TIMESTAMP '${y1 + 1}-01-01'
+      GROUP BY 1`, periods);
+    const by = new Map(rows.map((r) => [r.station_id, r]));
+    for (const s of state.stations) {
+      const hit = by.get(s.station_id);
+      s.painted = hit ? hit.painted : null;
+      s.painted_n = hit ? hit.painted_n : null;
+    }
+    state.paintedBy = { label: state.group.display_name || state.group.standard_name, unit: state.group.unit };
+    paintStations();
+    renderStationList();
+    // Now that the rows are counted, prefer a station that actually reports here,
+    // unless the reader already picked one.
+    const best = state.stations.filter((s) => s.painted_n).sort((a, b) => b.painted_n - a.painted_n)[0];
+    if (!state.stationChosen && best && best.station_id !== state.station?.station_id) {
+      await selectStation(best.station_id, false);
+    }
+    writeUrl();
+    setStatus('ready');
+  } catch (err) {
+    setStatus('query failed', 'error');
+    throw err;
+  } finally {
+    $('paint').disabled = false;
+  }
+}
+
+/* -------------------------------------------------------------------- sql */
+
+const EXAMPLES = {
+  'Hottest days on record': `-- row-group statistics on a sorted column, not a full scan
+SELECT s.station_name, s.network_name, o.obs_time, o.value AS deg_c
+FROM observations o JOIN stations s USING (station_id)
+WHERE o.period = '1997'
+  AND o.variable_id IN (SELECT variable_id FROM variables
+                        WHERE standard_name = 'air_temperature' AND cell_method = 'time: maximum')
+  AND o.value > 38
+ORDER BY o.value DESC LIMIT 25;`,
+  'Partition layout vs. reality': `-- 'period' is an opaque label; compare it to a year and you get silence, not an error
+SELECT period, rows, file_bytes, row_groups,
+       round(file_bytes / rows, 3) AS bytes_per_row
+FROM files ORDER BY obs_time_min;`,
+  'Coverage by network': `SELECT n.network_name, n.long_name, n.station_count,
+       count(s.station_id) FILTER (WHERE s.max_obs_time > '1995-01-01') AS active_1995
+FROM networks n LEFT JOIN stations s USING (network_name)
+GROUP BY 1,2,3 ORDER BY n.station_count DESC;`,
+  'Variables that exist in every network': `SELECT standard_name, cell_method, unit,
+       count(DISTINCT network_id) AS networks, count(*) AS network_scoped_ids
+FROM variables GROUP BY 1,2,3
+HAVING count(DISTINCT network_id) > 8 ORDER BY networks DESC;`,
+  'One station, one year, full resolution': `-- history_count counts upstream histories, not rows here,
+-- so ask the data which station is actually worth printing
+SELECT s.station_name, o.obs_time, o.variable_id, o.value
+FROM observations o JOIN stations s USING (station_id)
+WHERE o.period = '1997'
+  AND o.station_id = (SELECT station_id FROM observations
+                      WHERE period = '1997' GROUP BY 1 ORDER BY count(*) DESC LIMIT 1)
+ORDER BY o.obs_time LIMIT 500;`,
+  'Observations per month': `-- two columns, so the viewer charts it
+SELECT month(obs_time) AS month, count(*) AS observations
+FROM observations WHERE period = '1997'
+GROUP BY 1 ORDER BY 1;`,
+};
+
+function renderSql(panel) {
+  panel.innerHTML = `
+    <h2>SQL</h2>
+    <p class="cap">Views: <code>observations</code> (partitioned by <code>period</code>), <code>stations</code>,
+      <code>histories</code>, <code>variables</code>, <code>networks</code>, <code>files</code>.
+      Filter on <code>period</code> to prune files; the archive is remote Parquet, read by range request.</p>
+    <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
+      ${Object.keys(EXAMPLES).map((k, i) => `<button data-ex="${i}" style="width:auto">${esc(k)}</button>`).join('')}
+    </div>
+    <textarea id="sql" rows="7" spellcheck="false"></textarea>
+    <div class="row" style="margin:8px 0">
+      <button id="run" style="width:auto;background:var(--series-1);border-color:var(--series-1);color:#fff">Run ⌘↵</button>
+      <label class="hint" style="white-space:nowrap"><input type="checkbox" id="autochart" checked style="width:auto"> chart it when the shape fits</label>
+    </div>
+    <div id="sql-chart" class="chart" style="min-height:0"></div>
+    <div id="sql-out" class="scroll-x"></div>`;
+
+  const ta = $('sql');
+  ta.value = state.lastSql ?? Object.values(EXAMPLES)[0];
+  panel.querySelectorAll('[data-ex]').forEach((b) => {
+    b.onclick = () => { ta.value = Object.values(EXAMPLES)[+b.dataset.ex]; runSql(); };
+  });
+  $('run').onclick = runSql;
+  ta.onkeydown = (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runSql(); } };
+  runSql();
+}
+
+async function runSql() {
+  const sql = $('sql').value.trim().replace(/;\s*$/, '');
+  state.lastSql = $('sql').value;
+  const out = $('sql-out'), chartEl = $('sql-chart');
+  out.innerHTML = ''; chartEl.innerHTML = '';
+  setStatus('querying', 'busy');
+  let rows;
+  try {
+    rows = await q('sql', sql);
+  } catch (err) {
+    out.innerHTML = `<p class="err">${esc(String(err))}</p>`;
+    setStatus('query failed', 'error');
+    return;
+  }
+  setStatus('ready');
+  writeUrl();
+  if (!rows.length) { out.innerHTML = `<p class="cap">0 rows.</p>`; return; }
+
+  const cols = Object.keys(rows[0]);
+  const shown = rows.slice(0, 300);
+  out.innerHTML = `<table class="grid"><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+    <tbody>${shown.map((r) => `<tr>${cols.map((c) => {
+      const v = r[c];
+      const num = typeof v === 'number';
+      return `<td class="${num ? 'num' : ''}">${v == null ? '<span style="color:var(--text-muted)">null</span>'
+        : esc(num ? (Number.isInteger(v) ? fmtNum(v) : v.toFixed(3)) : String(v))}</td>`;
+    }).join('')}</tr>`).join('')}</tbody></table>
+    ${rows.length > shown.length ? `<p class="cap">showing ${fmtNum(shown.length)} of ${fmtNum(rows.length)} rows</p>` : ''}`;
+
+  if ($('autochart').checked) autoChart(chartEl, rows, cols);
+}
+
+/** Two columns where the first is a label or a time and the second is a number
+ *  is a chart. Anything else is a table, and that is fine. */
+function autoChart(el, rows, cols) {
+  if (cols.length !== 2 || rows.length > 400) return;
+  const [kx, ky] = cols;
+  const v0 = rows.find((r) => r[ky] != null)?.[ky];
+  if (typeof v0 !== 'number') return;
+  const xv = rows[0][kx];
+  const temporal = xv instanceof Date;
+  const numeric = typeof xv === 'number';
+  const data = rows.filter((r) => r[ky] != null);
+  const w = el.clientWidth || 820;
+  el.append(Plot.plot({
+    ...plotStyle, height: 200, width: w,
+    marginBottom: temporal || numeric ? 32 : 70,
+    x: temporal || numeric ? { label: kx } : { label: kx, tickRotate: -35 },
+    y: { label: ky, labelAnchor: 'top' },
+    marks: [
+      temporal
+        ? Plot.lineY(data, { x: kx, y: ky, stroke: 'var(--series-1)', strokeWidth: 1.8 })
+        : Plot.barY(data, { x: kx, y: ky, fill: 'var(--series-1)', rx: 2, sort: numeric ? undefined : { x: '-y' } }),
+      Plot.ruleY([0], { stroke: 'var(--border)' }),
+      Plot.tip(data, Plot.pointerX({ x: kx, y: ky, title: (d) => `${d[kx]}\n${fmtVal(d[ky])}` })),
+    ],
+  }));
+}
+
+/* -------------------------------------------------------------------- go */
+
+boot().catch((err) => {
+  setStatus('failed to start', 'error');
+  $('panel').innerHTML = `<p class="err">${esc(String(err))}</p>
+    <p class="cap">Serve the repository root with <code>scripts/serve.py</code>; the viewer needs HTTP range requests
+    and a <code>data/</code> directory beside it.</p>`;
+  console.error(err);
+});
+
+addEventListener('resize', () => { clearTimeout(window.__rz); window.__rz = setTimeout(render, 250); });
+</script>
+</body>
+</html>
