@@ -119,6 +119,15 @@ in `.github/workflows/`.
 ## Conventions
 
 - Prose in docs and comments: no em-dashes.
+- **`README.md` ships with the change that makes it wrong.** It is the only
+  document a reader outside this repo sees, and its commands get copied and run
+  without checking whether they still hold. It taught a 5-year-range backfill
+  loop that the per-run writer names make destructive, and described `backfill`
+  as resuming from watermarks it has never read. Someone followed it. A
+  stale README is not untidy, it is a recipe that loses data. When behaviour,
+  a default, a flag or a measured number changes, fix the README in the same
+  commit, and check the claims either side of the line you are editing while
+  you are there.
 - Comments explain *why*, not *what*. The modules are written to be read in
   order: `opendap` → `ingest` → `pack` → `compact` → `portolan`.
 - Paths live in `src/pcds/paths.py`. Do not hardcode prefixes anywhere else.
