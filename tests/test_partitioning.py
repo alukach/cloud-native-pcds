@@ -55,3 +55,69 @@ def test_periods_for_range_is_deduped_and_ordered():
 def test_label():
     assert label(2024, 2024) == "2024"
     assert label(1872, 1949) == "1872-1949"
+
+
+def test_cut_after_keeps_boundaries_on_existing_partitions():
+    # A re-plan is only useful if it can be applied to data already on disk.
+    # Here the floor falls mid-partition: unconstrained, the plan cuts after
+    # 2003, which splits a partition that runs 2003-2006 and forces a re-fetch.
+    yb = {y: 40 * MIB for y in range(2000, 2008)}
+    ends = {2002, 2006}  # what is written: 2000-2002, 2003-2006
+
+    free = plan_periods(yb, min_file_bytes=128 * MIB)
+    assert free[0].end_year == 2003, "precondition: the greedy cut lands inside a partition"
+
+    held = plan_periods(yb, min_file_bytes=128 * MIB, cut_after=ends)
+    # The invariant, not a particular shape: no period may end part-way through
+    # one that is already written. 2007 has nothing written past it, so a cut
+    # there (or a merge back over it) is free either way.
+    last_written = max(ends)
+    for p in held:
+        assert p.end_year in ends or p.end_year >= last_written, (
+            f"{p.period} ends inside a written partition"
+        )
+
+
+def test_cut_after_still_merges_a_trailing_stub_backwards():
+    yb = {2020: 200 * MIB, 2021: 200 * MIB, 2022: 1 * MIB}
+    periods = plan_periods(yb, min_file_bytes=128 * MIB, cut_after={2020, 2022})
+    assert [p.period for p in periods] == ["2020", "2021-2022"]
+
+
+def test_cut_after_none_is_the_old_behaviour():
+    yb = {y: 40 * MIB for y in range(2000, 2008)}
+    assert plan_periods(yb, min_file_bytes=128 * MIB) == plan_periods(
+        yb, min_file_bytes=128 * MIB, cut_after=None
+    )
+
+
+def test_replanning_the_measured_archive_merges_whole_partitions():
+    """The case this exists for, with the sizes actually measured on disk.
+
+    Five of ten periods came out under the 128 MiB floor because the pre-walk
+    estimate overpredicts. Re-planning has to fix that without cutting inside
+    any of the ten, or the rows have to be fetched again.
+    """
+    written = {  # period end year -> MiB actually written
+        1998: 129, 2002: 71, 2006: 138, 2009: 125, 2010: 0, 2012: 108,
+        2015: 115, 2018: 131, 2020: 116, 2022: 143, 2026: 207,
+    }
+    spans = [(1872, 1998), (1999, 2002), (2003, 2006), (2007, 2009), (2010, 2012),
+             (2013, 2015), (2016, 2018), (2019, 2020), (2021, 2022), (2023, 2026)]
+    yb = {}
+    for lo, hi in spans:
+        total = written[hi] * MIB
+        for y in range(lo, hi + 1):  # spread evenly; only the totals matter
+            yb[y] = total // (hi - lo + 1)
+
+    periods = plan_periods(
+        yb, min_file_bytes=128 * MIB, cut_after={hi for _, hi in spans}
+    )
+    ends = {hi for _, hi in spans}
+    for p in periods:
+        assert p.end_year in ends, f"{p.period} cuts inside a written partition"
+    # and every period now clears the floor
+    for p in periods:
+        got = sum(yb[y] for y in range(p.start_year, p.end_year + 1))
+        assert got >= 128 * MIB, f"{p.period} is still under the floor"
+    assert len(periods) < len(spans), "re-planning should merge, not keep ten"

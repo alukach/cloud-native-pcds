@@ -38,6 +38,7 @@ def plan_periods(
     year_bytes: dict[int, int],
     *,
     min_file_bytes: int = 128 * MIB,
+    cut_after: set[int] | None = None,
 ) -> list[Period]:
     """Greedily merge consecutive years until each bucket clears the floor.
 
@@ -51,6 +52,16 @@ def plan_periods(
     *below* the floor: PCDS is sparse enough before 1998 that clearing the floor
     there takes more than a century, so the cap fired first and left a 2.5 MiB
     partition the floor existed to prevent.
+
+    `cut_after` restricts where a period may end, and is how a re-plan stays
+    applicable to data that is already written. Left alone, the greedy cut lands
+    wherever the floor happens to fall, which after a walk is usually *inside*
+    an existing partition: the re-plan then looks fine and is unusable, because
+    the partition straddles two new periods and `scripts/repartition.py` has to
+    refuse it. Passing the end years of what is on disk makes every planned
+    period a union of whole existing ones, so the move is always local and
+    nothing is re-fetched. Years past the last written one belong in the set
+    too; there is no partition out there to straddle.
     """
     if not year_bytes:
         return []
@@ -63,7 +74,7 @@ def plan_periods(
         # A gap in coverage does not break the bucket -- empty years cost nothing
         # and keeping periods contiguous makes `period_for` total.
         acc += year_bytes.get(year, 0)
-        if acc >= min_file_bytes:
+        if acc >= min_file_bytes and (cut_after is None or year in cut_after):
             periods.append(Period(label(start, year), start, year))
             start = year + 1
             acc = 0

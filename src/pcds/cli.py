@@ -115,6 +115,13 @@ def layout(
         "Rebuilds the pre-backfill plan, which is the one that matches "
         "partitions written before a catalog existed.",
     ),
+    recut: bool = typer.Option(
+        False,
+        "--recut",
+        help="Allow period boundaries to land inside partitions already on "
+        "disk. Those years have to be re-fetched, so the default keeps cuts "
+        "on existing boundaries and re-plans by merging whole partitions.",
+    ),
 ):
     """(Re)plan the period partitioning so every partition clears the size floor."""
     _setup()
@@ -151,8 +158,26 @@ def layout(
         measured_rows=measured_rows,
         measured_bytes_per_row=bytes_per_row,
     )
+    # Where a cut is allowed to land. A re-plan that plants a boundary inside a
+    # written partition reads as a clean plan and cannot be applied: the
+    # partition straddles two new periods, so `repartition.py` refuses it and
+    # the only way forward is re-fetching those years. Cutting on the ends of
+    # what is already there keeps every new period a union of whole old ones.
+    cut_after: set[int] | None = None
+    if not recut and store.exists(paths.MANIFEST_FILE):
+        # The year a partition's rows actually end, not the year its label
+        # claims: a label is only an upper bound, and holding a walk to a
+        # boundary it never reached would refuse a move that is perfectly safe.
+        ends: dict[str, int] = {}
+        for r in catalog.load(store).to_pylist():
+            year = r["obs_time_max"].year
+            ends[r["period"]] = max(ends.get(r["period"], year), year)
+        if ends:
+            last = max(ends.values())
+            cut_after = set(ends.values()) | set(range(last + 1, end_year + 1))
+
     periods = plan_periods(
-        year_bytes, min_file_bytes=SETTINGS.min_file_bytes
+        year_bytes, min_file_bytes=SETTINGS.min_file_bytes, cut_after=cut_after
     ) or [Period(str(y), y, y) for y in range(start_year, end_year + 1)]
     # Re-planning after data exists moves boundaries, and nothing moves rows
     # between periods to follow: compaction only ever rewrites a period in
@@ -561,6 +586,35 @@ def portolan(
 ROW_GROUP_CAP = 150_000
 
 
+def duplicate_keys(con, glob: str) -> int:
+    """Count repeated (station_id, variable_id, obs_time) keys under one glob.
+
+    By neighbour, not by GROUP BY, and one period at a time. Hashing every key
+    in the archive at once needs the whole archive in memory or in temp files:
+    over 979M rows that died with an out-of-memory error, which meant the only
+    gate on duplicate keys stopped running at exactly the size where it starts
+    to matter.
+
+    Files are sorted by (station_id, variable_id, obs_time), so a duplicate can
+    only sit next to its twin, and an unpartitioned window streams in file order
+    without building anything. That makes the sort order load-bearing for this
+    check, so it is worth noting that `_check_partition_files` proves the order
+    separately, from the footers, rather than this trusting it blind. Periods
+    hold disjoint years, so no duplicate can hide between two of them.
+    """
+    # The window reads file order as sort order, so it has to actually get file
+    # order back.
+    con.execute("SET preserve_insertion_order=true;")
+    return con.execute(
+        "SELECT count(*) FROM ("
+        "  SELECT station_id s, variable_id v, obs_time t,"
+        "         lag(station_id) OVER () ps, lag(variable_id) OVER () pv,"
+        "         lag(obs_time)   OVER () pt"
+        f"  FROM read_parquet('{glob}')"
+        ") WHERE s = ps AND v = pv AND t = pt"
+    ).fetchone()[0]
+
+
 def _check_partition_files(store) -> list[str]:
     """Footer-only invariants over every observation partition file.
 
@@ -662,29 +716,33 @@ def verify(root: str = typer.Option(None), sample: int = typer.Option(5)):
     summary = cat.summarize(table)
     problems: list[str] = []
 
-    small = [
-        (r["path"], r["file_bytes"])
-        for r in table.to_pylist()
-        if r["file_bytes"] < SETTINGS.min_file_bytes // 4
-    ]
-    if len(small) > 1:
-        # Compaction packs a period but cannot grow one: it never moves a row
-        # across a boundary, so a period holding less than the floor stays under
-        # it however often you compact. That one is `pcds layout` to fix, and
-        # then `scripts/repartition.py` to apply without re-fetching.
-        problems.append(f"{len(small)} files under {SETTINGS.min_file_bytes // 4 // 1024**2} MiB "
-                        f"(run `pcds compact`; if they are already compacted, "
-                        f"the period is too narrow and needs `pcds layout`)")
+    # Size is judged per period, not per file: a period is allowed more than one
+    # file (that is what the target size is for), and it is the period total that
+    # the floor is about. A period under the floor cannot be compacted out of it,
+    # because compaction never moves a row across a boundary.
+    by_period: dict[str, int] = {}
+    for r in table.to_pylist():
+        by_period[r["period"]] = by_period.get(r["period"], 0) + r["file_bytes"]
+    floor = SETTINGS.min_file_bytes
+    under = sorted(p for p, b in by_period.items() if b < floor)
+    if under:
+        # Not `floor // 4`: that threshold was low enough to pass five of ten
+        # periods that the plan had promised would clear the floor, which is
+        # exactly the condition it exists to report.
+        problems.append(
+            f"{len(under)} period(s) under {floor // 1024**2} MiB: "
+            f"{', '.join(under)} (if they are already compacted the plan is too "
+            f"fine: `pcds layout` then `python scripts/repartition.py --apply`)"
+        )
 
     problems += _check_partition_files(store)
 
     con = duckdb_connect(SETTINGS, store)
     base = store.uri if store.uri.startswith("s3://") else store.root
-    glob = paths.observations_glob(base)
-    dupes = con.execute(
-        f"SELECT count(*) FROM (SELECT station_id, variable_id, obs_time FROM "
-        f"read_parquet('{glob}') GROUP BY 1,2,3 HAVING count(*) > 1)"
-    ).fetchone()[0]
+    dupes = sum(
+        duplicate_keys(con, f"{base.rstrip('/')}/{paths.period_prefix(p)}/*.parquet")
+        for p in sorted(by_period)
+    )
     if dupes:
         problems.append(f"{dupes:,} duplicate (station, variable, time) keys")
     con.close()
