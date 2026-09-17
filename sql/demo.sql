@@ -12,6 +12,7 @@ CREATE OR REPLACE VIEW variables AS SELECT * FROM read_parquet(getvariable('root
 CREATE OR REPLACE VIEW manifest  AS SELECT * FROM read_parquet(getvariable('root') || '/_manifest/files.parquet');
 CREATE OR REPLACE VIEW obs       AS SELECT * FROM read_parquet(getvariable('root') || '/observations/period=*/*.parquet', hive_partitioning := true);
 CREATE OR REPLACE VIEW layout    AS SELECT * FROM (SELECT unnest(periods, recursive := true) FROM read_json_auto(getvariable('root') || '/layout.json'));
+CREATE OR REPLACE VIEW monthly   AS SELECT * FROM read_parquet(getvariable('root') || '/observations_monthly/observations_monthly.parquet');
 
 -- `period` is an opaque partition label, NOT a year. Recent years stand alone
 -- (period=2025) but sparse history is bucketed (period=1872-1903), so comparing
@@ -26,6 +27,12 @@ CREATE OR REPLACE VIEW layout    AS SELECT * FROM (SELECT unnest(periods, recurs
 -- opens one file.
 CREATE OR REPLACE MACRO periods_for(lo, hi) AS TABLE
   SELECT period FROM layout WHERE end_year >= lo AND start_year <= hi;
+
+-- Same thing straight from the manifest, which needs no layout.json and takes
+-- timestamps rather than years. Prefer this one: `_manifest/files.parquet` is
+-- always published, layout.json is not always uploaded alongside it.
+CREATE OR REPLACE MACRO periods_between(lo, hi) AS TABLE
+  SELECT DISTINCT period FROM manifest WHERE obs_time_max >= lo AND obs_time_min <= hi;
 
 -- Filtering on obs_time alone is correct but prunes nothing: DuckDB cannot
 -- relate a string partition key to a timestamp column, and the files are sorted
@@ -43,8 +50,10 @@ SELECT period, count(*) AS files, sum(rows) AS rows,
 FROM manifest GROUP BY period ORDER BY period;
 
 -- 2. One station, one variable, one year.
---    periods_for() picks the partition; sorted-by-station row groups plus the
---    station_id bloom filter mean only a couple of row groups get fetched.
+--    periods_for() picks the partition; because station_id is the leading sort
+--    key its min/max statistics prune exactly, so only a couple of row groups
+--    get fetched. (There is no bloom filter, and deliberately so: it cannot beat
+--    exact pruning on the leading sort key, and it costs extra round trips.)
 SELECT o.obs_time, o.value
 FROM obs o
 JOIN stations s USING (station_id)
@@ -87,9 +96,33 @@ ORDER BY station_name
 LIMIT 20;
 
 -- 5. Freshness: what the last append run picked up.
+--    NOT `WHERE period = strftime(current_date, '%Y')`. That compares the
+--    partition label to a year, which is the exact footgun documented above:
+--    the current year usually lives in a multi-year bucket, so it matches no
+--    partition and returns zero rows with no error. Resolve through the
+--    manifest, which knows which label holds today.
 SELECT max(obs_time) AS latest_observation,
        count(DISTINCT station_id) AS stations_reporting
-FROM obs WHERE period = strftime(current_date, '%Y');
+FROM obs WHERE period IN (
+  SELECT period FROM periods_between(current_date - INTERVAL 30 DAY, current_date)
+);
+
+-- 7. Monthly aggregates: read the rollup, not the raw table.
+--    Same answer, ~2% of the archive. The raw table cannot prune below the
+--    partition on time, so a month-grain question over `obs` pays for the whole
+--    obs_time column of a period: measured, 1,191 range requests and 17 MiB
+--    against 28 requests and 1.35 MiB here.
+SELECT m.month, round(avg(m.mean), 2) AS mean_c, sum(m.n) AS observations
+FROM monthly m
+JOIN variables v USING (variable_id)
+WHERE v.standard_name = 'air_temperature' AND v.cell_method = 'time: point'
+  AND m.month >= DATE '2024-01-01' AND m.month < DATE '2025-01-01'
+GROUP BY 1 ORDER BY 1;
+
+-- 8. `mean` composes only weighted. Quantiles do not compose at all and are not
+--    in the rollup; go to `obs` for those, naming a station so it stays cheap.
+SELECT round(sum(m.mean * m.n) / sum(m.n), 2) AS mean_c
+FROM monthly m WHERE m.station_id = 1 AND m.month >= DATE '2024-01-01';
 
 -- 6. How much did that actually read?
 -- PRAGMA enable_profiling;

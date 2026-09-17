@@ -837,7 +837,7 @@ because as strings `'1872-1903'` sorts below `'1900'`.
 - Sorted within each file by `(station_id, variable_id, obs_time)`. That leaves
   `obs_time` interleaved per station, so its row-group statistics prune almost
   nothing and the partition is effectively the time granularity.
-- Row groups capped at 150,000 rows; page index and a `station_id` bloom filter
+- Row groups of 1M rows; page index and sorted-column statistics
   written so a point lookup skips row groups rather than decoding them.
 - zstd level 9.
 
@@ -999,9 +999,11 @@ def deviations_md(cfg: CatalogConfig) -> str:
         "Worth stating explicitly, because they look like they might be:",
         "",
         "- **Row groups.** PORTO-FMT-009 caps GeoParquet row groups at 150,000 rows.",
-        "  It sits under Vector and so does not reach a non-spatial table, but the",
-        "  observation files honour it anyway: at roughly 3 bytes per row that is about",
-        "  450 KiB per row group, which is a sensible floor for a range request.",
+        "  It sits under Vector and so does not reach a non-spatial table, and the",
+        "  observation files no longer follow it: they use 1M-row row groups. A reader",
+        "  issues one range request per row group per column, so the 150,000-row",
+        "  setting cost ~1,187 requests to move 16 MiB out of one period. At 1M rows",
+        "  that is ~6x fewer requests, and the page index still skips within a chunk.",
         "- **Visualization.** Non-geospatial collections are exempt from the render-path",
         "  requirement. The two spatial collections are small enough to render from",
         "  source, which the spec allows without a separate style file, and both carry a",
