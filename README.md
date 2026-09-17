@@ -28,7 +28,7 @@ Six steps, one CLI command each.
 
 5. **Compact** (`pcds compact`, quarterly) reads a period partition plus the deltas that land in it, sorts and dedupes in DuckDB last-write-wins on `(station_id, variable_id, obs_time)` by the delta's `ingested_at`, and rewrites target-sized files through the same writer. Every file it emits is between `PCDS_MIN_FILE_BYTES` and `PCDS_MAX_FILE_BYTES` (128 MiB and 1 GiB): the writer rolls once a file passes the 256 MiB target, so only the final file can come out short, and it is merged back into its predecessor rather than left as a stub. The one case no writer can fix is a period holding less than the floor in total; that is a `pcds layout` problem and `pcds verify` says so. Freshness and file size are on separate schedules precisely because one day of arrivals is nowhere near one good file.
 
-6. **Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order, duplicate keys and file sizes. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
+6. **Publish** (`pcds catalog`, `pcds verify`, `pcds portolan`). `catalog` records per-file row counts, byte sizes and station/time ranges into `_manifest/`, so a reader can choose files without a LIST against the bucket. `verify` reads Parquet footers directly to check sort order and file sizes, and scans one period at a time for duplicate keys. `portolan` writes the STAC metadata that turns the tree into a browsable catalog, including the two spec requirements it knowingly breaks.
 
 The result is five published collections (`observations`, `stations`, `histories`, `variables`, `networks`) plus three underscore-prefixed directories that are pipeline machinery rather than data: `_manifest/`, `_state/` and `_staging/`. Paths are defined in `src/pcds/paths.py` and nowhere else.
 
@@ -136,7 +136,7 @@ Both ends of the record are now measured. 115.7M rows over 1872-1997 pack to **1
 
 ### Partitioning by *period*, not by year
 
-Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 128 MiB floor: sparse history buckets into decades or, before 1999, into one bucket; recent years pair up. Ten periods of 129 to 242 MiB cover 1872-2026.
+Strict yearly partitioning gives ~155 partitions ranging from a few hundred KiB to several hundred MiB, and small files are the fastest way to make a "cloud-optimized" dataset slow. A **period** is instead a contiguous run of years chosen so every partition clears a 128 MiB floor: sparse history buckets into decades or, before 1999, into one bucket; recent years pair up. Six periods of 129 to 256 MiB cover 1872-2026, holding 979,687,688 rows in 1.25 GiB. The first plan cut ten, five of them under the floor: the pre-walk estimate overpredicts, so only measured data can size this properly, which is why re-planning after the walk is worth doing.
 
 The floor is the *only* cut rule. A `max_span_years` cap used to also cut a bucket once it grew past 50 years, and since PCDS needs more than a century of sparse history to clear any floor at all, the cap fired first and emitted a 2.5 MiB `period=1872-1921` -- exactly the partition the floor existed to prevent.
 
@@ -236,7 +236,7 @@ uv run pcds plan                 # sizing + cadence report
 uv run pcds backfill --start-year 2020 --end-year 2026
 uv run pcds compact              # fold + dedupe + re-pack
 uv run pcds catalog              # per-file stats
-uv run pcds verify               # sort order, duplicate keys, file sizes
+uv run pcds verify               # sort order, duplicate keys, period sizes
 uv run pcds portolan --base-url https://.../pcds --s3-uri s3://.../pcds
 
 # Day to day.
@@ -255,7 +255,9 @@ One layout period per run, 8 shards inside it, compaction after each. Restartabl
 
 **Batch by period, never by year range.** `backfill` names its output `s<shard>-<NNNNN>.parquet` and resets the index every run, so two runs that both write into a partition overwrite each other's files rather than adding to them. A run covering 1971-1980 writes its 1971 rows into `period=1970-1971` under the same filenames a previous 1800-1970 run used for its 1970 rows, and the 1970 data is gone with no error and nothing in the log. Taking start and end straight from `layout.json` makes that impossible, which is the whole reason the script exists.
 
-Do not re-plan the layout part way through. `pcds layout` is a planning tool for a partitioning that does not exist yet; once data is written, moving a boundary orphans the partition that carried the old label, and compaction will not move rows between periods to repair it. It warns when a new plan would orphan a written partition. Re-plan when the walk is finished, if at all.
+Do not re-plan the layout part way through. Moving a boundary orphans the partition that carried the old label, and compaction will not move rows between periods to repair it. `pcds layout` warns when a new plan would orphan one. Re-plan when the walk is finished, which is when it is actually useful: the pre-walk sizes are estimates and they overpredict, so the first plan cuts too fine and only measured data can correct it.
+
+**Re-planning after the walk is applicable by construction.** `pcds layout` takes its cut points from the end years already on disk, so every period in the new plan is a union of whole existing ones and `scripts/repartition.py` can move the rows locally. Without that it would cut wherever the floor happened to fall, which is usually part-way through a written partition, and a plan that straddles one cannot be applied at all: those years have to be fetched again. `--recut` lifts the restriction when that is what you want.
 
 If a mid-walk re-plan has already happened, `pcds layout --ignore-catalog` rebuilds the pre-backfill plan from station metadata alone, which is the one that matches partitions written before a catalog existed.
 
@@ -472,7 +474,7 @@ partitions, since the partition is the only time-pruning granularity there is.
 - **Climatologies** (`.../lister/climo/...`) are not ingested yet; the lister supports them and they would become a sixth collection.
 - **Two Portolan requirements are knowingly unmet.** See `DEVIATIONS.md` in the built catalog, and the table above.
 - **Partition swap is not atomic.** Compaction stages to `obs/_staging/`, deletes the old partition, then moves. There is a short window where a reader LISTing the prefix sees a partial partition. The catalog is written last, so catalog-driven readers are safe; a generation-suffixed prefix or an Iceberg table would close it properly. It is also a durability window, not only a visibility one: a crash after the delete and part way through the moves leaves the staged remainder to be wiped by the next run, and those rows have to be re-fetched.
-- **Re-partitioning written data only works when periods nest.** Compaction rewrites a period in place and never moves a row between periods, so `pcds layout` still warns that a new plan orphans written partitions. `scripts/repartition.py` recovers the common case without re-fetching anything: when the floor goes up, old periods merge without splitting, so each orphan nests whole inside one new period and its rows only need moving. It judges that on the rows rather than the period label, since a label only bounds what a partition holds, and it refuses to run when the data itself straddles two new periods, which genuinely does need those years re-fetched. Run `pcds layout` once and then only `repartition.py`: chaining them re-plans on every run, and the plan moves as the walk writes more years.
+- **Re-partitioning written data only works when periods nest**, and `pcds layout` now guarantees they do. Compaction rewrites a period in place and never moves a row between periods, so a re-plan still orphans written partitions and still warns about it. What changed is that the new boundaries are drawn from the end years already on disk, so each orphan nests whole inside exactly one new period by construction and `scripts/repartition.py` only has to move rows. It judges nesting on the rows rather than the period label, since a label only bounds what a partition holds, and it still refuses when the data itself straddles two new periods, which `--recut` is the only way to cause now. Run `pcds layout` once and then only `repartition.py`: chaining them re-plans on every run, and the plan moves as the walk writes more years.
 - **Time zones.** Observations are stored as published, in naive local standard time. `histories.tz_offset` is carried through but not applied.
 - **Non-BC records.** Everything is filtered to `provinces=BC`; PCDS also holds some Alberta data, and PCIC runs a separate Yukon/NWT instance on the same API.
 

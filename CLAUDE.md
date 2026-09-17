@@ -6,17 +6,19 @@ unverified, and which mistakes are easy to make here.
 
 ## Status
 
-The offline paths now run and are gated in CI. Nothing has yet touched the live
-API or an S3 endpoint, so treat a smoke-test failure as informative rather than
-surprising.
+The archive is walked: 1872-2026 is on disk, ~980M rows, and the DuckDB
+compaction SQL has now run against real volumes rather than fixtures.
 
-- 100 tests pass, pyarrow ones included. `tests/test_conformance.py` builds a
-  small catalog on disk and runs a real `rashid check` over it.
-- `ruff check .` is clean. The lint rule set is pinned explicitly in
-  `pyproject.toml`; ruff's implicit default widens between releases and took the
-  repo from clean to 56 findings on an upgrade.
-- Still first-run-unverified: everything that talks to PCIC or to S3, and the
-  DuckDB compaction SQL against real volumes.
+- Tests pass and `ruff check .` is clean. The lint rule set is pinned explicitly
+  in `pyproject.toml`; ruff's implicit default widens between releases and took
+  the repo from clean to 56 findings on an upgrade.
+- `tests/test_conformance.py` builds a small catalog on disk and runs a real
+  `rashid check` over it.
+- **The published bucket lags the local archive.** Source Cooperative still
+  serves the pre-walk copy, so anything reading it, `viewer/index.html`
+  included, is showing a fraction of what exists.
+- Still first-run-unverified: writing to S3. Everything that talks to PCIC has
+  now run in anger.
 
 Six bugs were found and fixed getting there. The first three made the pipeline
 unrunnable; the last three lose data quietly, which is worse:
@@ -46,10 +48,10 @@ Do not relitigate these without a reason; each was argued through once.
 | Decision | Why |
 |---|---|
 | Long/tidy observation schema | 22 networks define 358 variables with no common wide schema. Wide is mostly nulls and needs schema evolution per sensor. Sorted long packs to ~1.1 bytes/row measured, against the ~3 this row used to claim. |
-| Partition by `period`, not year | PCDS spans a handful of manual daily stations in 1872 to ~950 mostly-hourly ones now. Strict yearly gives ~155 partitions from KiB to hundreds of MiB. `pcds layout` merges sparse years to clear a **128 MiB** floor, the low end of the conventional 128 MiB - 1 GiB range. Ten periods of 129-242 MiB cover 1872-2026. The floor is the only cut rule; a `max_span_years=50` cap used to fire first over the sparse head and emit a 2.5 MiB partition, which is what the floor exists to prevent. Low end deliberately: the partition is the only time-pruning granularity, so every doubling doubles what a one-year query reads. |
+| Partition by `period`, not year | PCDS spans a handful of manual daily stations in 1872 to ~950 mostly-hourly ones now. Strict yearly gives ~155 partitions from KiB to hundreds of MiB. `pcds layout` merges sparse years to clear a **128 MiB** floor, the low end of the conventional 128 MiB - 1 GiB range. Six periods of 129-256 MiB cover 1872-2026, holding 979,687,688 rows. The first plan produced ten of 71-207 MiB, five of them under the floor, because the pre-walk estimate overpredicts; re-planning against measured data and merging is what fixed it. The floor is the only cut rule; a `max_span_years=50` cap used to fire first over the sparse head and emit a 2.5 MiB partition, which is what the floor exists to prevent. Low end deliberately: the partition is the only time-pruning granularity, so every doubling doubles what a one-year query reads. |
 | Per-station lister, not the bulk `agg` zip | `agg` aggregates server-side, is not restartable, and took >35s for one network for one day. The lister parallelizes and resumes. |
 | Daily append, quarterly compaction | Arrival is ~218k obs/day, ~225 KiB packed. You would wait ~1,166 days to fill one target-sized file, so freshness and file size are separate schedules. Append stages small deltas; compaction packs them. Quarterly is also a floor and not only a sizing choice: a staged delta is not published, so the compaction interval is the real publication lag. |
-| Plan the layout once, before the walk | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity. Re-planning once data exists still moves boundaries under written partitions and orphans them; `pcds layout` warns which ones. But re-backfilling is now the fallback, not the only option: when the floor goes **up**, old periods merge without splitting, every orphan nests whole inside one new period, and `scripts/repartition.py` moves the rows locally with nothing re-fetched. It refuses when a written period straddles two new ones, which does need those years re-fetched. |
+| Re-planning the layout is safe by default | Compaction rewrites a period *in place* and never moves a row between periods, so the layout is the only thing that decides time-pruning granularity. Re-planning after a walk used to be a trap: the greedy cut lands wherever the floor falls, which is usually *inside* a written partition, and the plan then looks fine and cannot be applied. `pcds layout` now takes its cut points from the end years already on disk, so every new period is a union of whole old ones and `scripts/repartition.py` can always move the rows locally with nothing re-fetched. `--recut` opts out and plans freely, which does mean re-fetching the years whose boundaries moved. The estimate is what makes this necessary: it overpredicts, so the first plan cuts too fine and only measured data can correct it. |
 | 30-day trailing re-read | PCDS is explicitly preliminary. Observations get corrected and late data arrives for weeks. Append-only would bake in wrong values. |
 | 150k-row row groups | Matches Portolan's GeoParquet cap so one fewer thing to explain. The "~450 KiB compressed" that justified it assumed 3 bytes/row; measured, it is 1.06-1.4, so a row group is ~160-210 KiB. Smaller than ideal for a range request. Not yet changed, since the cap is the other half of the reason. |
 | Portolan, knowingly non-conformant | Two MUSTs cannot be met by a large time-partitioned non-spatial table. See `DEVIATIONS.md` in built output and `src/pcds/portolan.py::DEVIATIONS`. |
