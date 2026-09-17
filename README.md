@@ -397,9 +397,19 @@ What the page demonstrates is partition pruning, with the arithmetic on screen.
 Every query is logged with its SQL, its wall time, the partitions it could reach,
 and the bytes it pulled. The counts come from `_manifest/files.parquet` at load
 time, so a re-partition changes what the page says without changing the page.
-That matters right now: the published archive is currently a **single** object
-covering 1872-1998, so there is no partition pruning left to demonstrate and
-row-group pruning on `station_id` is carrying the page on its own.
+The published archive is **six** objects now, 1872-2026, so partition pruning is
+back to being the thing on display rather than something the page has to
+apologise for.
+
+Pruning decides what gets *read*, but it does not by itself decide what gets
+*probed*. A view spanning every object hands DuckDB the whole file list, and
+DuckDB expands that list on every bind, which over HTTP is one `HEAD` per
+object, serialised, before `period` exists as a column to filter on. Six objects
+meant six probes per query, repeated for every query, since `HEAD` is not cached.
+So the page names the files a window actually needs, through `obsScan(periods)`,
+and the file list becomes the pruning: a one-partition question probes one
+object. The `observations` view stays for the SQL console, where the reader has
+no `periods` in hand and `WHERE period = ...` is the only lever they have.
 
 The sidebar reports what the partition filter leaves *reachable*, which is the
 number partitioning exists to move; the per-query byte column is measured by

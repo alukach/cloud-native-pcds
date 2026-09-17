@@ -254,6 +254,7 @@ const fmtVal = (n) => n == null ? '' : (Math.abs(n) >= 1000 || n === 0 ? n.toFix
 const state = {
   db: null, conn: null,
   summary: null, periods: [], byPeriod: new Map(),
+  statsOrigin: null,
   groups: [], group: null,
   stations: [], station: null, stationChosen: false,
   paintedBy: null,
@@ -281,12 +282,25 @@ function reachable(periods) {
 
 /** Bytes the local bucket has actually served, when there is one listening.
  *  scripts/serve.py counts them; a published bucket does not, so this is a
- *  development instrument and the UI does without it when absent. */
+ *  development instrument and the UI does without it when absent.
+ *
+ *  The first answer settles it for the session. A published bucket answers the
+ *  probe with an S3 error document, and asking again either side of every query
+ *  was spending two round-trips per read to re-learn the same no. */
 async function servedBytes() {
+  if (state.statsOrigin === false) return null;
   try {
     const r = await fetch(new URL('/__stats', BASE).href, { cache: 'no-store' });
-    return (await r.json()).bytes;
-  } catch { return null; }
+    const { bytes } = await r.json();
+    // A bucket that answers with something other than the counter is not one
+    // either: taking it on faith turns every reported total into NaN.
+    if (typeof bytes !== 'number') throw new Error('not a byte counter');
+    state.statsOrigin = true;
+    return bytes;
+  } catch {
+    state.statsOrigin = false;
+    return null;
+  }
 }
 
 /** Run SQL, and account for it: wall time, bytes the server actually sent, and
@@ -351,6 +365,20 @@ function periodsFor(y0, y1) {
 
 const obsUrls = (periods) =>
   periods.flatMap((p) => state.byPeriod.get(p).paths).map((u) => `'${u}'`).join(', ');
+
+/** The partitions a query needs, as a scan it can bind directly.
+ *
+ *  Filtering the `observations` view on `period` prunes what gets *read*, but not
+ *  what gets *probed*. The view names every object in the bucket, and DuckDB
+ *  expands that list through Glob on every bind, which over HTTP means one HEAD
+ *  per object, serialised, before `period` exists as a column to filter on. So a
+ *  ten-year question paid for six round-trips to rediscover files the manifest
+ *  had already described, on every query, since HEAD is not cached.
+ *
+ *  Naming the files instead makes the file list itself the pruning: one
+ *  partition, one probe. The view stays for the SQL console, where the reader
+ *  has no `periods` in hand and `WHERE period = ...` is the only lever. */
+const obsScan = (periods) => `read_parquet([${obsUrls(periods)}], hive_partitioning = true)`;
 
 const years = () => {
   const y0 = Math.min(+$('y0').value, +$('y1').value);
@@ -717,7 +745,7 @@ async function pickDefault(y0, y1) {
   const periods = periodsFor(y0, y1);
   const winner = await q('pick an opening station worth showing', `
     SELECT station_id, count(value) AS n
-    FROM observations
+    FROM ${obsScan(periods)}
     WHERE period IN (${periods.map((x) => `'${x}'`).join(',')})
       AND station_id IN (${shortlist.map((x) => x.station_id).join(',')})
       AND variable_id IN (${state.group.ids.join(',')})
@@ -831,7 +859,7 @@ async function renderSeries(panel) {
   const rows = await q(`series · station ${s.station_id}`, `
     SELECT epoch_ms(date_trunc('${grain}', obs_time)) AS t,
            avg(value) AS v, min(value) AS lo, max(value) AS hi, count(value) AS n
-    FROM observations
+    FROM ${obsScan(periods)}
     WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
       AND station_id = ${s.station_id}
       AND variable_id IN (${state.group.ids.join(',')})
@@ -880,7 +908,7 @@ async function renderClimo(panel) {
     SELECT month(obs_time) AS m, avg(value) AS mean,
            quantile_cont(value, 0.1) AS p10, quantile_cont(value, 0.9) AS p90,
            min(value) AS lo, max(value) AS hi, count(value) AS n
-    FROM observations
+    FROM ${obsScan(periods)}
     WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
       AND station_id = ${s.station_id}
       AND variable_id IN (${state.group.ids.join(',')})
@@ -923,7 +951,7 @@ async function renderNetwork(panel) {
            avg(o.value) AS mean,
            count(DISTINCT o.station_id) AS stations,
            count(o.value) AS n
-    FROM observations o
+    FROM ${obsScan(periods)} o
     ${net ? `JOIN stations s USING (station_id)` : ''}
     WHERE o.period IN (${periods.map((p) => `'${p}'`).join(',')})
       AND o.variable_id IN (${state.group.ids.join(',')})
@@ -971,7 +999,7 @@ async function paintByMean() {
   try {
     const rows = await q('per-station mean (recolours the map)', `
       SELECT station_id, avg(value) AS painted, count(value) AS painted_n
-      FROM observations
+      FROM ${obsScan(periods)}
       WHERE period IN (${periods.map((p) => `'${p}'`).join(',')})
         AND variable_id IN (${state.group.ids.join(',')})
         AND value IS NOT NULL
