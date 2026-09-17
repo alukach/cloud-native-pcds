@@ -13,6 +13,7 @@ the two copies drifted apart while both claimed to be current.
 from __future__ import annotations
 
 OBSERVATIONS = "observations"
+OBSERVATIONS_MONTHLY = "observations_monthly"
 STATIONS = "stations"
 HISTORIES = "histories"
 VARIABLES = "variables"
@@ -36,6 +37,7 @@ DELTA = f"{STAGING}/delta"
 COMPACT_STAGING = f"{STAGING}/compact"
 
 LAYOUT_FILE = "layout.json"
+MONTHLY_FILE = f"{OBSERVATIONS_MONTHLY}/{OBSERVATIONS_MONTHLY}.parquet"
 MANIFEST_FILE = f"{MANIFEST}/files.parquet"
 SUMMARY_FILE = f"{MANIFEST}/summary.json"
 WATERMARKS_FILE = f"{STATE}/watermarks.parquet"

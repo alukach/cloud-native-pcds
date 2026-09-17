@@ -43,6 +43,29 @@ OBSERVATIONS = pa.schema(
     },
 )
 
+# Monthly rollup. A pure function of OBSERVATIONS, rebuilt whole on every
+# compaction, and ~2% of the archive. It exists because the partition is the
+# only time-pruning granularity: a reader issues one range request per row group
+# per column, so any month-or-coarser aggregate over the raw table pays for the
+# whole obs_time column of a period. `n` is count(value), not count(*), so the
+# means compose weighted: sum(mean*n)/sum(n). Quantiles do not compose and are
+# deliberately absent; read the raw table for those.
+OBSERVATIONS_MONTHLY = pa.schema(
+    [
+        pa.field("station_id", pa.int32(), nullable=False),
+        pa.field("variable_id", pa.int16(), nullable=False),
+        pa.field("month", pa.date32(), nullable=False),
+        pa.field("n", pa.int32(), nullable=False),
+        pa.field("mean", pa.float64(), nullable=True),
+        pa.field("lo", pa.float64(), nullable=True),
+        pa.field("hi", pa.float64(), nullable=True),
+    ],
+    metadata={
+        b"pcds.source": b"Derived from the observations collection; rebuilt whole each compaction.",
+        b"pcds.sort_order": b"variable_id, month, station_id",
+    },
+)
+
 # Staging deltas carry provenance so the compactor can resolve revisions.
 DELTA = pa.schema(
     [

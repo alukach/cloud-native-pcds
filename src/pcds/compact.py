@@ -13,8 +13,9 @@ duplicates last-write-wins on (station_id, variable_id, obs_time), re-sorts, and
 rewrites target-sized files with the full encoding treatment.
 
 DuckDB does the sort/dedupe because it spills to disk; pyarrow does the write
-because the encoding knobs that matter (page index, bloom filters, explicit
-DELTA_BINARY_PACKED on obs_time) are not reachable through DuckDB's COPY.
+because the encoding knobs that matter (page index, per-column dictionary,
+explicit DELTA_BINARY_PACKED on obs_time) are not reachable through DuckDB's
+COPY.
 """
 
 from __future__ import annotations
@@ -23,12 +24,13 @@ import datetime as dt
 import logging
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from . import paths
 from .config import Settings
 from .pack import RollingWriter
 from .partitioning import Layout
-from .schema import OBSERVATIONS
+from .schema import OBSERVATIONS, OBSERVATIONS_MONTHLY
 from .storage import Store, duckdb_connect
 
 log = logging.getLogger("pcds.compact")
@@ -137,16 +139,26 @@ def compact_period(
         store.delete(staging)
         return {"period": period, "rows": 0, "files": 0, "skipped": "no rows"}
 
-    # Swap. Object stores give no atomic directory rename, so the window between
-    # delete and move is a real (short) inconsistency. Readers that care should
-    # use the catalog, which is updated last.
-    store.delete(base_prefix)
+    # Swap. Move the new files in first, then delete whatever of the old set
+    # they did not replace. Object stores give no atomic directory rename, but
+    # every period is a single object at current sizes, so move-then-prune makes
+    # the common case one atomic object replacement: a reader sees the old file
+    # or the new one, never a gap. The previous order deleted the prefix first,
+    # which left a window where the period did not exist at all. It degrades to
+    # the old behaviour only if a period ever holds more than one file, and then
+    # only for the files beyond the first.
+    stale = {i.path for i in store.ls(base_prefix)}
     store.mkdirs(base_prefix)
     final = []
     for p in written:
         dest = store.join(base_prefix, p.rsplit("/", 1)[-1])
         store.fs.move(p, dest)
         final.append(dest)
+    for path in sorted(stale - set(final)):
+        # fs.delete_file, not store.delete: these paths came out of store.ls and
+        # are already absolute within the filesystem, and store.delete would join
+        # them onto the root again and silently delete nothing.
+        store.fs.delete_file(path)
     store.delete(staging)
     log.info("compacted period=%s: %d rows into %d files", period, rows, len(final))
     return {"period": period, "rows": rows, "files": len(final)}
@@ -163,6 +175,61 @@ def compact_all(
         span = (p.start_year, p.end_year) if p else (int(name[:4]), int(name[-4:]))
         out.append(compact_period(store, settings, name, span))
     return out
+
+
+def build_monthly(store: Store, settings: Settings) -> dict:
+    """Rebuild the monthly rollup from every published partition.
+
+    Whole, never incrementally. The rollup is a pure function of the partitions
+    and the whole-archive rebuild is seconds, so there is no reconciliation path
+    to get wrong and no way for it to drift except the publish window that is
+    already not atomic. Do not add an incremental path here without a very good
+    reason: a rollup that disagrees with its source is worse than no rollup.
+
+    Sorted (variable_id, month, station_id) on purpose. The queries this serves
+    are "one variable across many stations for a span of months"; station-first
+    measured 21x worse on exactly that shape, and the per-station queries stay
+    cheap regardless because the whole file is tens of MiB.
+    """
+    con = duckdb_connect(settings, store)
+    base = store.uri if store.uri.startswith("s3://") else store.root
+    try:
+        table = (
+            con.execute(
+                f"""
+                SELECT station_id, variable_id,
+                       date_trunc('month', obs_time)::DATE AS month,
+                       count(value)::INT AS n,
+                       avg(value) AS mean, min(value) AS lo, max(value) AS hi
+                FROM read_parquet('{paths.observations_glob(base)}')
+                WHERE value IS NOT NULL
+                GROUP BY 1, 2, 3
+                ORDER BY variable_id, month, station_id
+                """
+            )
+            .arrow()
+            .read_all()
+            .cast(OBSERVATIONS_MONTHLY)
+        )
+    finally:
+        con.close()
+
+    path = store.join(paths.MONTHLY_FILE)
+    store.mkdirs(paths.OBSERVATIONS_MONTHLY)
+    with store.fs.open_output_stream(path) as sink:
+        pq.write_table(
+            table,
+            sink,
+            compression=settings.compression,
+            compression_level=settings.compression_level,
+            version="2.6",
+            data_page_version="2.0",
+            write_statistics=True,
+            write_page_index=True,
+            row_group_size=settings.row_group_rows,
+        )
+    log.info("monthly rollup: %d rows", table.num_rows)
+    return {"rows": table.num_rows, "path": paths.MONTHLY_FILE}
 
 
 def clear_deltas(store: Store, before: dt.datetime | None = None) -> int:
