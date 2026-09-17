@@ -208,14 +208,15 @@ def test_clean_catalog_has_no_partition_problems(catalog):
 
 
 def test_oversized_row_group_is_caught(catalog):
-    """PORTO-FMT-009. rashid cannot see this: observations has no data asset."""
+    """Our own bound on row group size. rashid cannot see this: observations has
+    no data asset. Not PORTO-FMT-009, which does not reach a non-spatial table."""
     path = _partition_file(catalog)
     table = pq.read_table(path)
     oversized = pa.concat_tables([table] * (ROW_GROUP_CAP // table.num_rows + 1))
     pq.write_table(oversized, path, row_group_size=len(oversized), compression="zstd")
 
     problems = _check_partition_files(catalog)
-    assert any("PORTO-FMT-009" in p for p in problems), problems
+    assert any("row group over" in p for p in problems), problems
 
 
 def test_schema_drift_between_partitions_is_caught(catalog):

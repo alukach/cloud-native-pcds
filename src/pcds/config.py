@@ -61,10 +61,16 @@ class Settings:
     # RollingWriter, which refuses settings that could cross it.
     max_file_bytes: int = _env_int("PCDS_MAX_FILE_BYTES", 1024 * MIB)
     # Row group sizing drives how much a range request must pull for a predicate
-    # hit. 150,000 rows is ~450 KiB compressed in this schema, and it matches the
-    # cap Portolan puts on GeoParquet row groups (PORTO-FMT-009), so the
-    # observation files follow the same rule even though they are not GeoParquet.
-    row_group_rows: int = _env_int("PCDS_ROW_GROUP_ROWS", 150_000)
+    # hit, and it also sets the request *count*: a reader issues one GET per row
+    # group per column it touches. At 150,000 rows a modern period held 1,185 row
+    # groups, so a one-year scan cost 1,187 requests to move 16 MiB. 1M rows is
+    # the measured knee: ~6x fewer requests on a scan, and station lookups get
+    # cheaper too, because a station straddles fewer row-group boundaries and the
+    # page index we already write does the skipping inside the bigger chunk. Past
+    # ~10x one station's rows the page index runs out of road and they degrade.
+    # This is no longer pinned to Portolan's GeoParquet cap (PORTO-FMT-009); that
+    # requirement sits under Vector and does not reach a non-spatial table.
+    row_group_rows: int = _env_int("PCDS_ROW_GROUP_ROWS", 1_000_000)
     data_page_bytes: int = _env_int("PCDS_DATA_PAGE_BYTES", 1 * MIB)
     compression: str = os.environ.get("PCDS_COMPRESSION", "zstd")
     compression_level: int = _env_int("PCDS_COMPRESSION_LEVEL", 9)

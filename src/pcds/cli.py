@@ -437,7 +437,7 @@ def compact(
 ):
     """Fold staged deltas into period partitions; dedupe, re-sort, re-pack."""
     _setup()
-    from .compact import clear_deltas, compact_all
+    from .compact import build_monthly, clear_deltas, compact_all
 
     store = _store(root)
     lay = _layout(store)
@@ -510,6 +510,19 @@ def compact(
                 "refreshed manifest: %d files, %s rows", summary["files"], f"{summary['rows']:,}"
             )
 
+    # The rollup is derived from what compaction just published, so it has to be
+    # rebuilt here or it is stale the moment anything folds. Rebuilt whole even
+    # for a --period run: it is a single grouped scan and partial rebuilds are
+    # how a derived table starts disagreeing with its source.
+    try:
+        monthly = build_monthly(store, SETTINGS)
+    except Exception as exc:  # noqa: BLE001
+        # Same reasoning as the manifest above: derived, so a failure here must
+        # not take down a compaction that is already durable on disk.
+        log.warning("monthly rollup not rebuilt (%s); re-run `pcds compact`", exc)
+    else:
+        log.info("rebuilt monthly rollup: %s rows", f"{monthly['rows']:,}")
+
 
 # ----------------------------------------------------------------- catalog --
 
@@ -581,9 +594,10 @@ def portolan(
 
 # ------------------------------------------------------------------ verify --
 
-# PORTO-FMT-009. Portolan writes it for GeoParquet; the observation files honour
-# it anyway, so it is the number to assert against.
-ROW_GROUP_CAP = 150_000
+# Not PORTO-FMT-009: that requirement sits under Vector and does not reach a
+# non-spatial table, so this is our own sanity bound on Settings.row_group_rows,
+# there to catch a writer that ran with a wildly different setting.
+ROW_GROUP_CAP = 1_000_000
 
 
 def duplicate_keys(con, glob: str) -> int:
@@ -661,8 +675,8 @@ def _check_partition_files(store) -> list[str]:
 
     if oversized:
         problems.append(
-            f"{len(oversized)} file(s) with a row group over {ROW_GROUP_CAP:,} rows "
-            f"(PORTO-FMT-009): {', '.join(oversized[:3])}"
+            f"{len(oversized)} file(s) with a row group over {ROW_GROUP_CAP:,} rows: "
+            f"{', '.join(oversized[:3])}"
         )
     if len(schemas) > 1:
         shapes = "; ".join(f"{files[0]} -> {list(cols)}" for (cols, _), files in schemas.items())
