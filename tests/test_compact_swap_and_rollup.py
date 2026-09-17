@@ -153,6 +153,28 @@ def test_monthly_rollup_matches_the_raw_table(tmp_path):
         assert means[station] == sum(vals) / len(vals)
 
 
+def test_rollup_is_built_even_with_nothing_to_compact(tmp_path, monkeypatch):
+    """A freshly walked archive has no staged deltas, so `pcds compact` takes
+    its "nothing to compact" path. The rollup is derived from the partitions,
+    not the deltas, so that path must still build one -- otherwise the archive
+    that most needs a rollup is the one that never gets it."""
+    from typer.testing import CliRunner
+
+    from pcds.cli import app
+
+    settings = _settings(tmp_path)
+    store = open_store(settings)
+    _write_base(store, _obs(1, 1, 10), ["part-00000.parquet"])
+    monkeypatch.setenv("PCDS_ROOT", str(tmp_path))
+
+    assert not store.exists(paths.MONTHLY_FILE)
+    result = CliRunner().invoke(app, ["compact", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert store.exists(paths.MONTHLY_FILE)
+    assert pq.read_table(store.join(paths.MONTHLY_FILE)).num_rows == 1
+
+
 def test_monthly_rollup_is_sorted_variable_first(tmp_path):
     """Sort order is load-bearing: station-first measured 21x worse on the
     many-stations-one-variable query the rollup exists to serve."""

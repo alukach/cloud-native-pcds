@@ -429,6 +429,24 @@ def append(
 # ----------------------------------------------------------------- compact --
 
 
+def _rebuild_monthly(store) -> None:
+    """Rebuild the monthly rollup, whole, and never fail the caller over it.
+
+    Whole even after a --period run: it is a single grouped scan, and a partial
+    rebuild is how a derived table starts quietly disagreeing with its source.
+    """
+    from .compact import build_monthly
+
+    try:
+        monthly = build_monthly(store, SETTINGS)
+    except Exception as exc:  # noqa: BLE001
+        # Derived, like the manifest: a failure here must not take down a
+        # compaction that is already durable on disk.
+        log.warning("monthly rollup not rebuilt (%s); re-run `pcds compact`", exc)
+    else:
+        log.info("rebuilt monthly rollup: %s rows", f"{monthly['rows']:,}")
+
+
 @app.command()
 def compact(
     root: str = typer.Option(None),
@@ -437,7 +455,7 @@ def compact(
 ):
     """Fold staged deltas into period partitions; dedupe, re-sort, re-pack."""
     _setup()
-    from .compact import build_monthly, clear_deltas, compact_all
+    from .compact import clear_deltas, compact_all
 
     store = _store(root)
     lay = _layout(store)
@@ -467,7 +485,12 @@ def compact(
         else:
             periods = []
     if not periods:
+        # Still rebuild the rollup. It is derived from the *partitions*, not
+        # from the deltas, so a no-delta run is exactly when it can be missing:
+        # a freshly walked archive has nothing staged and would otherwise never
+        # get one.
         log.info("nothing to compact")
+        _rebuild_monthly(store)
         return
     stats = compact_all(store, SETTINGS, lay, periods)
     for s in stats:
@@ -510,18 +533,7 @@ def compact(
                 "refreshed manifest: %d files, %s rows", summary["files"], f"{summary['rows']:,}"
             )
 
-    # The rollup is derived from what compaction just published, so it has to be
-    # rebuilt here or it is stale the moment anything folds. Rebuilt whole even
-    # for a --period run: it is a single grouped scan and partial rebuilds are
-    # how a derived table starts disagreeing with its source.
-    try:
-        monthly = build_monthly(store, SETTINGS)
-    except Exception as exc:  # noqa: BLE001
-        # Same reasoning as the manifest above: derived, so a failure here must
-        # not take down a compaction that is already durable on disk.
-        log.warning("monthly rollup not rebuilt (%s); re-run `pcds compact`", exc)
-    else:
-        log.info("rebuilt monthly rollup: %s rows", f"{monthly['rows']:,}")
+    _rebuild_monthly(store)
 
 
 # ----------------------------------------------------------------- catalog --
